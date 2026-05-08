@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>十六进制 ⇄ ASCII 转换工具</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <main class="container">
+        <header>
+            <h1 id="viewTitle">十六进制 ⇄ ASCII 转换工具</h1>
+            <p id="viewSubtitle">输入十六进制或 ASCII 文本并点击转换按钮，即可快速验证编码是否正确。</p>
+        </header>
+
+        <div class="layout">
+            <nav class="tool-menu" aria-label="工具菜单">
+                <button class="tool-menu-item active" data-view-target="protocol">HHGL协议组包 / 解包</button>
+                <button class="tool-menu-item" data-view-target="converter">十六进制 ⇄ ASCII</button>
+                <button class="tool-menu-item" data-view-target="ipvalidator">IP包验证</button>
+            </nav>
+
+            <div class="tool-content">
+                <div class="view" data-view="converter" data-title="十六进制 ⇄ ASCII 转换工具" data-subtitle="输入十六进制或 ASCII 文本并点击转换按钮，即可快速验证编码是否正确。">
+                    <section class="panel">
+                        <label for="hexInput">十六进制输入</label>
+                        <textarea id="hexInput" placeholder="例如：48656c6c6f"></textarea>
+                        <div class="panel-actions">
+                            <button id="hexToAsciiBtn" class="primary">转为 ASCII</button>
+                            <button data-target="hexInput" class="clear-btn">清空</button>
+                        </div>
+                    </section>
+
+                    <section class="panel">
+                        <label for="asciiInput">ASCII 输入</label>
+                        <textarea id="asciiInput" placeholder="例如：Hello"></textarea>
+                        <div class="panel-actions">
+                            <button id="asciiToHexBtn" class="primary">转为十六进制</button>
+                            <button data-target="asciiInput" class="clear-btn">清空</button>
+                        </div>
+                    </section>
+
+                    <section class="panel panel--result">
+                        <h2>转换结果</h2>
+                        <textarea id="result" readonly placeholder="这里会显示转换结果"></textarea>
+                        <div class="panel-actions">
+                            <button id="copyResultBtn">复制结果</button>
+                            <span id="status" class="status" role="status" aria-live="polite"></span>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="view is-hidden" data-view="protocol" data-title="协议组包与解包工具" data-subtitle="填写字段或粘贴完整帧，用于快速验证双串口协议的数据封装与解析。">
+                    <section class="panel">
+            <h2>协议解包验证</h2>
+            <p class="panel-caption">按照协议格式输入完整帧（十六进制），工具将解析并展示各字段含义。</p>
+            <label for="protocolHexInput">协议帧（十六进制）</label>
+            <textarea id="protocolHexInput" placeholder="例如：EB90007001000548656C6C6F"></textarea>
+            <div class="panel-actions">
+                <button id="decodeProtocolBtn" class="primary">解包</button>
+                <button data-target="protocolHexInput" data-status="protocolDecodeStatus" class="clear-btn">清空</button>
+                <span id="protocolDecodeStatus" class="status" role="status" aria-live="polite"></span>
+            </div>
+            <div id="protocolDecodeResult" class="protocol-result" aria-live="polite"></div>
+        </section>
+
+        <section class="panel">
+            <h2>协议组包验证</h2>
+            <p class="panel-caption">填写字段值后点击组包，工具会根据双串口帧格式自动生成十六进制帧。</p>
+            <div class="field-grid">
+                <label for="startMarkerInput">起始标识</label>
+                <input id="startMarkerInput" type="text" value="EB90" autocomplete="off">
+
+                <label for="infoTypeInput">信息类型</label>
+                <select id="infoTypeInput" class="format-select">
+                    <option value="0x07">0x07 - AT命令</option>
+                    <option value="0x0F">0x0F - 短信</option>
+                    <option value="0x13">0x13 - 语音</option>
+                    <option value="0x17">0x17 - 数据</option>
+                    <option value="0x1F">0x1F - AQ指令</option>
+                </select>
+
+                <label for="frameIdInput">帧计数</label>
+                <input id="frameIdInput" type="text" value="0x01" autocomplete="off">
+
+                <div class="input-group">
+                    <label for="payloadInput">信息内容</label>
+                    <select id="payloadFormat" class="format-select">
+                        <option value="hex">十六进制</option>
+                        <option value="ascii" selected>ASCII</option>
+                    </select>
+                </div>
+                <textarea id="payloadInput" placeholder="AT+CGMR"></textarea>
+                <p class="field-note">提示：默认ASCII格式输入会自动转换为十六进制，默认在内容后添加\r后缀</p>
+
+                <div class="input-group">
+                    <label for="prefixSuffix">前缀/后缀</label>
+                    <select id="prefixSuffix" class="format-select">
+                        <option value="none">无</option>
+                        <option value="prefix_cr">前缀 \r</option>
+                        <option value="suffix_cr" selected>后缀 \r</option>
+                        <option value="prefix_crlf">前缀 \r\n</option>
+                        <option value="suffix_crlf">后缀 \r\n</option>
+                    </select>
+                </div>
+            </div>
+            <div class="panel-actions">
+                <button id="encodeProtocolBtn" class="primary">组包</button>
+                <button data-target="payloadInput" data-status="protocolEncodeStatus" class="clear-btn">清空内容</button>
+                <button id="copyProtocolBtn">复制帧</button>
+                <span id="protocolEncodeStatus" class="status" role="status" aria-live="polite"></span>
+            </div>
+            <textarea id="protocolEncodeResult" readonly placeholder="组包结果会显示在此"></textarea>
+        </section>
+                </div>
+
+                <div class="view is-hidden" data-view="ipvalidator" data-title="IP包验证工具" data-subtitle="封装或解析IP包，填写源/目的IP即可快速构建IP包，或输入十六进制数据验证完整性。">
+                    <section class="panel">
+                        <h2>IP包封装</h2>
+                        <p class="panel-caption">填写发送方IP和接收方IP，即可构建符合IPv4规范的IP包。协议、TTL、载荷可选。</p>
+                        <div class="field-grid">
+                            <label for="ipBuilderSrcIp">发送方IP（源IP）</label>
+                            <input id="ipBuilderSrcIp" type="text" placeholder="例如：192.168.1.1" autocomplete="off">
+
+                            <label for="ipBuilderDstIp">接收方IP（目的IP）</label>
+                            <input id="ipBuilderDstIp" type="text" placeholder="例如：192.168.1.2" autocomplete="off">
+
+                            <label for="ipBuilderProtocol">协议</label>
+                            <select id="ipBuilderProtocol" class="format-select">
+                                <option value="6">6 - TCP</option>
+                                <option value="17" selected>17 - UDP</option>
+                                <option value="1">1 - ICMP</option>
+                                <option value="2">2 - IGMP</option>
+                            </select>
+
+                            <label for="ipBuilderTtl">TTL</label>
+                            <input id="ipBuilderTtl" type="text" value="64" placeholder="64" autocomplete="off">
+
+                            <label for="ipBuilderPayload">载荷（十六进制，可选）</label>
+                            <textarea id="ipBuilderPayload" placeholder="可选，例如：68656C6C6F" rows="3"></textarea>
+                        </div>
+                        <div class="panel-actions">
+                            <button id="buildIpPacketBtn" class="primary">构建IP包</button>
+                            <button data-target="ipBuilderPayload" data-status="ipBuildStatus" class="clear-btn">清空载荷</button>
+                            <button id="copyIpBuildResultBtn">复制结果</button>
+                            <span id="ipBuildStatus" class="status" role="status" aria-live="polite"></span>
+                        </div>
+                        <textarea id="ipBuildResult" readonly placeholder="构建的IP包十六进制数据将显示在此"></textarea>
+                    </section>
+
+                    <section class="panel">
+                        <h2>IP包解析与验证</h2>
+                        <p class="panel-caption">输入IP包的十六进制数据，工具将解析IP包头信息并验证包的完整性（包括长度、版本、校验和等）。</p>
+                        <label for="ipPacketInput">IP包数据（十六进制）</label>
+                        <textarea id="ipPacketInput" placeholder="例如：4500003C1C4640004006B1E6C0A80101C0A80102"></textarea>
+                        <div class="panel-actions">
+                            <button id="validateIpPacketBtn" class="primary">验证IP包</button>
+                            <button data-target="ipPacketInput" data-status="ipValidateStatus" class="clear-btn">清空</button>
+                            <button id="ipValidateFromBuildBtn">从封装结果填充</button>
+                            <span id="ipValidateStatus" class="status" role="status" aria-live="polite"></span>
+                        </div>
+                        <div id="ipValidateResult" class="protocol-result" aria-live="polite"></div>
+                    </section>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>提示：十六进制输入会自动忽略空格、换行和诸如 <code>0x</code> 的前缀。</p>
+            <div id="updateTime" class="update-time">最后更新：2025-12-29 22:46</div>
+        </footer>
+    </main>
+
+    <script src="main.js"></script>
+</body>
+</html>
+
