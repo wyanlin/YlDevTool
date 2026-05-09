@@ -1275,9 +1275,9 @@ function attachAudioPcmParser() {
             return null;
         }
 
-        if (!file.name.toLowerCase().endsWith(".txt")) {
+        if (!/\.(txt|log)$/i.test(file.name)) {
             renderAudioPcmResult(null);
-            setStatus("当前只处理txt日志文件。", "error", statusId);
+            setStatus("当前只处理txt或log日志文件。", "error", statusId);
             return null;
         }
 
