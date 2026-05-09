@@ -182,6 +182,7 @@ textarea[readonly] {
 }
 
 input[type="text"],
+input[type="file"],
 select {
     width: 100%;
     padding: 10px 14px;
@@ -337,6 +338,56 @@ select {
     margin: 0;
 }
 
+.download-title {
+    margin: 16px 0 10px;
+    font-size: 1rem;
+}
+
+.download-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.download-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    background: rgba(37, 99, 235, 0.12);
+    color: var(--accent);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.download-link:hover,
+.download-link:focus-visible {
+    background: rgba(37, 99, 235, 0.2);
+    outline: none;
+}
+
+.call-list {
+    display: grid;
+    gap: 10px;
+}
+
+.call-card {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, 0.08);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.call-card span {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
 @media (max-width: 640px) {
     .container {
         padding: 32px 16px 48px;
@@ -351,6 +402,7 @@ select {
 
     .tool-menu {
         flex-direction: row;
+        flex-wrap: wrap;
         position: static;
         padding: 12px;
         justify-content: space-between;
@@ -373,4 +425,3 @@ select {
         grid-template-columns: 1fr;
     }
 }
-

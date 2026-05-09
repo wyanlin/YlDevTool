@@ -18,6 +18,7 @@
                 <button class="tool-menu-item active" data-view-target="protocol">HHGL协议组包 / 解包</button>
                 <button class="tool-menu-item" data-view-target="converter">十六进制 ⇄ ASCII</button>
                 <button class="tool-menu-item" data-view-target="ipvalidator">IP包验证</button>
+                <button class="tool-menu-item" data-view-target="audiopcm">音频数据解析</button>
             </nav>
 
             <div class="tool-content">
@@ -162,6 +163,43 @@
                         <div id="ipValidateResult" class="protocol-result" aria-live="polite"></div>
                     </section>
                 </div>
+
+                <div class="view is-hidden" data-view="audiopcm" data-title="音频数据解析工具" data-subtitle="选择RIL日志txt文件，按筛选词和音频前缀提取Base64数据并导出PCM文件。">
+                    <section class="panel">
+                        <h2>日志输入</h2>
+                        <p class="panel-caption">选择包含音频Base64日志的txt文件，工具会在浏览器本地解析，不上传文件。</p>
+                        <div class="field-grid">
+                            <label for="audioLogFile">日志文件</label>
+                            <input id="audioLogFile" type="file" accept=".txt,text/plain">
+
+                            <label for="audioInitialFilter">初步筛选词</label>
+                            <input id="audioInitialFilter" type="text" value="RIL_TT-AT" autocomplete="off">
+
+                            <label for="audioSendPrefix">音频数据发送前缀</label>
+                            <input id="audioSendPrefix" type="text" value="AT^DAUDPCM=" autocomplete="off">
+
+                            <label for="audioRecvPrefix">音频数据接收前缀</label>
+                            <input id="audioRecvPrefix" type="text" value="^DAUDPCM:" autocomplete="off">
+                        </div>
+                        <div class="panel-actions">
+                            <button id="scanAudioCallsBtn" class="primary">扫描通话</button>
+                            <button id="generateAudioPcmBtn">生成所选通话PCM</button>
+                            <button id="clearAudioPcmBtn" data-status="audioPcmStatus" class="clear-btn">清空</button>
+                            <span id="audioPcmStatus" class="status" role="status" aria-live="polite"></span>
+                        </div>
+                        <div class="field-grid">
+                            <label for="audioCallSelect">通话列表</label>
+                            <select id="audioCallSelect" class="format-select" disabled>
+                                <option value="">请先扫描通话</option>
+                            </select>
+                        </div>
+                    </section>
+
+                    <section class="panel">
+                        <h2>解析结果</h2>
+                        <div id="audioPcmResult" class="protocol-result" aria-live="polite"></div>
+                    </section>
+                </div>
             </div>
         </div>
 
@@ -174,4 +212,3 @@
     <script src="main.js"></script>
 </body>
 </html>
-

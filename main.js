@@ -296,6 +296,520 @@ function renderProtocolDecode(result) {
     `;
 }
 
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function splitLogLines(text) {
+    if (!text) {
+        return [];
+    }
+    return text.split(/\r\n|\n|\r/);
+}
+
+function stripPairedQuotes(value) {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+        return trimmed.slice(1, -1).trim();
+    }
+    return trimmed;
+}
+
+function extractAudioPayload(line, prefix) {
+    const index = line.indexOf(prefix);
+    if (index < 0) {
+        return null;
+    }
+
+    return stripPairedQuotes(line.slice(index + prefix.length));
+}
+
+function stripTrailingLogQuote(value) {
+    const trimmed = value.trim();
+    return trimmed.endsWith("\"") ? trimmed.slice(0, -1).trim() : trimmed;
+}
+
+function decodeBase64ToBytes(payload) {
+    const normalized = stripTrailingLogQuote(payload).replace(/\s+/g, "");
+    if (!normalized) {
+        throw new Error("Base64内容为空");
+    }
+
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 !== 0) {
+        throw new Error("Base64格式不正确");
+    }
+
+    const binary = atob(normalized);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+}
+
+function createAudioDirectionResult() {
+    return {
+        matchedLines: [],
+        chunks: [],
+        decodedLines: 0,
+        skippedLines: 0,
+        bytes: 0,
+        failures: [],
+    };
+}
+
+function appendAudioPayload(result, line, lineNumber, prefix) {
+    const payload = extractAudioPayload(line, prefix);
+    if (payload === null) {
+        return false;
+    }
+
+    result.matchedLines.push(line);
+
+    try {
+        const bytes = decodeBase64ToBytes(payload);
+        result.chunks.push(bytes);
+        result.decodedLines += 1;
+        result.bytes += bytes.byteLength;
+    } catch (error) {
+        result.skippedLines += 1;
+        if (result.failures.length < 10) {
+            result.failures.push({
+                lineNumber,
+                reason: error.message,
+            });
+        }
+    }
+
+    return true;
+}
+
+function getFilteredAudioEntries(text, initialFilter) {
+    const filter = initialFilter.trim();
+    return splitLogLines(text)
+        .map((line, index) => ({ line, lineNumber: index + 1 }))
+        .filter((entry) => !filter || entry.line.includes(filter));
+}
+
+function parseAudioPcmEntries(entries, options) {
+    const sendPrefix = options.sendPrefix.trim();
+    const recvPrefix = options.recvPrefix.trim();
+
+    if (!sendPrefix) {
+        throw new Error("音频数据发送前缀不能为空。");
+    }
+    if (!recvPrefix) {
+        throw new Error("音频数据接收前缀不能为空。");
+    }
+
+    const filteredLines = entries ?? [];
+    const send = createAudioDirectionResult();
+    const recv = createAudioDirectionResult();
+
+    filteredLines.forEach(({ line, lineNumber }) => {
+        appendAudioPayload(send, line, lineNumber, sendPrefix);
+        appendAudioPayload(recv, line, lineNumber, recvPrefix);
+    });
+
+    return {
+        totalLines: options.totalLines ?? filteredLines.length,
+        filteredLines: filteredLines.length,
+        send,
+        recv,
+    };
+}
+
+function parseAudioPcmLog(text, options) {
+    const entries = getFilteredAudioEntries(text, options.initialFilter ?? "");
+    return parseAudioPcmEntries(entries, {
+        ...options,
+        totalLines: splitLogLines(text).length,
+    });
+}
+
+function splitCsvFields(value) {
+    const fields = [];
+    let current = "";
+    let inQuotes = false;
+
+    for (const ch of value) {
+        if (ch === "\"") {
+            inQuotes = !inQuotes;
+            current += ch;
+            continue;
+        }
+
+        if (ch === "," && !inQuotes) {
+            fields.push(current.trim());
+            current = "";
+            continue;
+        }
+
+        current += ch;
+    }
+
+    fields.push(current.trim());
+    return fields;
+}
+
+function parseIntegerField(value) {
+    const normalized = stripPairedQuotes(String(value ?? ""));
+    if (!/^-?\d+$/.test(normalized)) {
+        return null;
+    }
+    return parseInt(normalized, 10);
+}
+
+function parseDsciEvent(line) {
+    const marker = "^DSCI:";
+    const index = line.indexOf(marker);
+    if (index < 0) {
+        return null;
+    }
+
+    const fields = splitCsvFields(stripTrailingLogQuote(line.slice(index + marker.length)));
+    if (fields.length < 3) {
+        return null;
+    }
+
+    return {
+        id: parseIntegerField(fields[0]),
+        idr: parseIntegerField(fields[1]),
+        stat: parseIntegerField(fields[2]),
+        type: parseIntegerField(fields[3]),
+        mpty: parseIntegerField(fields[4]),
+        number: stripPairedQuotes(fields[5] ?? ""),
+        numType: parseIntegerField(fields[6]),
+        cause: parseIntegerField(fields[8]),
+        rawFields: fields,
+    };
+}
+
+function parseAtdCallStart(line) {
+    const match = line.match(/(?:^|[\s:>])ATD([^;\s"]+);/);
+    if (!match) {
+        return null;
+    }
+
+    return {
+        number: match[1],
+    };
+}
+
+function countAudioHits(entries, startIndex, endIndex, sendPrefix, recvPrefix) {
+    let send = 0;
+    let recv = 0;
+    for (let i = startIndex; i <= endIndex; i += 1) {
+        const line = entries[i]?.line ?? "";
+        if (line.includes(sendPrefix)) {
+            send += 1;
+        }
+        if (line.includes(recvPrefix)) {
+            recv += 1;
+        }
+    }
+    return { send, recv };
+}
+
+function createCallSegment({ direction, number, startEntry, startIndex, dsciId = null, startReason }) {
+    return {
+        direction,
+        number: number || "未知号码",
+        dsciId,
+        startLineNumber: startEntry.lineNumber,
+        endLineNumber: startEntry.lineNumber,
+        startIndex,
+        endIndex: startIndex,
+        startReason,
+        endReason: "",
+        explicitEnd: false,
+        sendHitCount: 0,
+        recvHitCount: 0,
+    };
+}
+
+function buildCallSegments(entries, options) {
+    const sendPrefix = options.sendPrefix.trim();
+    const recvPrefix = options.recvPrefix.trim();
+    const calls = [];
+    const activeCalls = [];
+    const activeById = new Map();
+
+    const removeActiveCall = (call) => {
+        const index = activeCalls.indexOf(call);
+        if (index >= 0) {
+            activeCalls.splice(index, 1);
+        }
+        if (call.dsciId !== null) {
+            activeById.delete(call.dsciId);
+        }
+    };
+
+    const finalizeCall = (call, endIndex, reason, explicitEnd) => {
+        if (call.endReason) {
+            return;
+        }
+        const safeEndIndex = Math.max(call.startIndex, Math.min(endIndex, entries.length - 1));
+        const audioHits = countAudioHits(entries, call.startIndex, safeEndIndex, sendPrefix, recvPrefix);
+        call.endIndex = safeEndIndex;
+        call.endLineNumber = entries[safeEndIndex]?.lineNumber ?? call.startLineNumber;
+        call.endReason = reason;
+        call.explicitEnd = explicitEnd;
+        call.sendHitCount = audioHits.send;
+        call.recvHitCount = audioHits.recv;
+        removeActiveCall(call);
+    };
+
+    const closeOpenCallsBefore = (entryIndex, reason) => {
+        const endIndex = Math.max(0, entryIndex - 1);
+        [...activeCalls].forEach((call) => finalizeCall(call, endIndex, reason, false));
+    };
+
+    entries.forEach((entry, entryIndex) => {
+        const atd = parseAtdCallStart(entry.line);
+        const dsci = parseDsciEvent(entry.line);
+        const isIncomingStart = dsci && dsci.id !== null && dsci.idr === 1 && (dsci.stat === 4 || dsci.stat === 5);
+
+        if (atd) {
+            closeOpenCallsBefore(entryIndex, "未见明确结束，按下一通开始前兜底");
+            const call = createCallSegment({
+                direction: "主叫",
+                number: atd.number,
+                startEntry: entry,
+                startIndex: entryIndex,
+                startReason: "ATD语音拨号",
+            });
+            calls.push(call);
+            activeCalls.push(call);
+        }
+
+        if (isIncomingStart && !activeById.has(dsci.id)) {
+            closeOpenCallsBefore(entryIndex, "未见明确结束，按下一通开始前兜底");
+            const call = createCallSegment({
+                direction: "被叫",
+                number: dsci.number,
+                startEntry: entry,
+                startIndex: entryIndex,
+                dsciId: dsci.id,
+                startReason: `DSCI来电状态${dsci.stat}`,
+            });
+            calls.push(call);
+            activeCalls.push(call);
+            activeById.set(dsci.id, call);
+        }
+
+        if (dsci && dsci.id !== null && dsci.stat !== 6) {
+            const pendingOutgoing = activeCalls.find((call) => call.direction === "主叫" && call.dsciId === null && dsci.idr === 0);
+            if (pendingOutgoing) {
+                pendingOutgoing.dsciId = dsci.id;
+                if (dsci.number) {
+                    pendingOutgoing.number = dsci.number;
+                }
+                activeById.set(dsci.id, pendingOutgoing);
+            }
+        }
+
+        if (dsci && dsci.id !== null && dsci.stat === 6) {
+            const call = activeById.get(dsci.id) ?? activeCalls[0];
+            if (call) {
+                finalizeCall(call, entryIndex, `DSCI状态6终止${dsci.cause !== null ? `，cause=${dsci.cause}` : ""}`, true);
+            }
+        }
+    });
+
+    if (entries.length > 0) {
+        [...activeCalls].forEach((call) => finalizeCall(call, entries.length - 1, "未见明确结束，按文件末尾兜底", false));
+    }
+
+    return calls.map((call, index) => ({
+        ...call,
+        index,
+        entries: entries.slice(call.startIndex, call.endIndex + 1),
+    }));
+}
+
+function scanAudioCalls(text, options) {
+    const sendPrefix = options.sendPrefix.trim();
+    const recvPrefix = options.recvPrefix.trim();
+    if (!sendPrefix) {
+        throw new Error("音频数据发送前缀不能为空。");
+    }
+    if (!recvPrefix) {
+        throw new Error("音频数据接收前缀不能为空。");
+    }
+
+    const totalLines = splitLogLines(text).length;
+    const entries = getFilteredAudioEntries(text, options.initialFilter ?? "");
+    const calls = buildCallSegments(entries, { sendPrefix, recvPrefix });
+
+    return {
+        totalLines,
+        filteredLines: entries.length,
+        entries,
+        calls,
+    };
+}
+
+const audioPcmDownloadUrls = [];
+
+function releaseAudioPcmDownloadUrls() {
+    while (audioPcmDownloadUrls.length > 0) {
+        URL.revokeObjectURL(audioPcmDownloadUrls.pop());
+    }
+}
+
+function createAudioDownloadFile(filename, blob) {
+    const url = URL.createObjectURL(blob);
+    audioPcmDownloadUrls.push(url);
+    return {
+        filename,
+        blob,
+        url,
+        bytes: blob.size,
+    };
+}
+
+function buildAudioDownloadFiles(result, call) {
+    releaseAudioPcmDownloadUrls();
+
+    const files = [];
+    const prefix = `call_${String((call?.index ?? 0) + 1).padStart(3, "0")}`;
+    if (result.send.matchedLines.length > 0) {
+        files.push(createAudioDownloadFile(
+            `${prefix}_send_pcm.txt`,
+            new Blob([result.send.matchedLines.join("\n")], { type: "text/plain;charset=utf-8" })
+        ));
+    }
+    if (result.recv.matchedLines.length > 0) {
+        files.push(createAudioDownloadFile(
+            `${prefix}_recv_pcm.txt`,
+            new Blob([result.recv.matchedLines.join("\n")], { type: "text/plain;charset=utf-8" })
+        ));
+    }
+    if (result.send.chunks.length > 0) {
+        files.push(createAudioDownloadFile(
+            `${prefix}_send_audio.pcm`,
+            new Blob(result.send.chunks, { type: "application/octet-stream" })
+        ));
+    }
+    if (result.recv.chunks.length > 0) {
+        files.push(createAudioDownloadFile(
+            `${prefix}_recv_audio.pcm`,
+            new Blob(result.recv.chunks, { type: "application/octet-stream" })
+        ));
+    }
+
+    return files;
+}
+
+function renderAudioScanResult(scanResult) {
+    const container = document.getElementById("audioPcmResult");
+    if (!container) {
+        return;
+    }
+
+    releaseAudioPcmDownloadUrls();
+
+    const callsHtml = scanResult.calls.length
+        ? `
+            <h3 class="download-title">通话概览</h3>
+            <div class="call-list">
+                ${scanResult.calls.map((call) => `
+                    <div class="call-card">
+                        <strong>#${call.index + 1} ${escapeHtml(call.direction)} ${escapeHtml(call.number)}</strong>
+                        <span>行 ${call.startLineNumber} - ${call.endLineNumber}</span>
+                        <span>${escapeHtml(call.endReason)}</span>
+                        <span>发送音频 ${call.sendHitCount} 行，接收音频 ${call.recvHitCount} 行</span>
+                    </div>
+                `).join("")}
+            </div>
+        `
+        : "";
+
+    container.innerHTML = `
+        <dl class="protocol-list">
+            <dt>原始行数</dt>
+            <dd>${scanResult.totalLines}</dd>
+            <dt>初筛命中数</dt>
+            <dd>${scanResult.filteredLines}</dd>
+            <dt>识别通话数</dt>
+            <dd>${scanResult.calls.length}</dd>
+        </dl>
+        ${callsHtml}
+    `;
+}
+
+function renderAudioPcmResult(result, files = [], call = null) {
+    const container = document.getElementById("audioPcmResult");
+    if (!container) {
+        return;
+    }
+
+    if (!result) {
+        container.innerHTML = "";
+        releaseAudioPcmDownloadUrls();
+        return;
+    }
+
+    const skippedLines = result.send.skippedLines + result.recv.skippedLines;
+    const decodedLines = result.send.decodedLines + result.recv.decodedLines;
+    const failures = [...result.send.failures, ...result.recv.failures];
+    const failureHtml = failures.length
+        ? `<dt>跳过明细</dt><dd>${failures.map((item) => `行 ${item.lineNumber}: ${escapeHtml(item.reason)}`).join("<br>")}</dd>`
+        : "";
+    const callHtml = call
+        ? `
+            <dt>所选通话</dt>
+            <dd>#${call.index + 1} ${escapeHtml(call.direction)} ${escapeHtml(call.number)}，行 ${call.startLineNumber} - ${call.endLineNumber}</dd>
+            <dt>结束状态</dt>
+            <dd>${call.explicitEnd ? "明确结束" : "兜底结束"}：${escapeHtml(call.endReason)}</dd>
+        `
+        : "";
+    const sendWriteStatus = result.send.chunks.length > 0
+        ? `成功，${result.send.bytes} 字节`
+        : "未生成该方向PCM";
+    const recvWriteStatus = result.recv.chunks.length > 0
+        ? `成功，${result.recv.bytes} 字节`
+        : "未生成该方向PCM";
+    const downloadHtml = files.length
+        ? `
+            <h3 class="download-title">生成文件</h3>
+            <div class="download-list">
+                ${files.map((file) => `<a class="download-link" href="${file.url}" download="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}（${file.bytes} 字节）</a>`).join("")}
+            </div>
+        `
+        : "";
+
+    container.innerHTML = `
+        <dl class="protocol-list">
+            ${callHtml}
+            <dt>原始行数</dt>
+            <dd>${result.totalLines}</dd>
+            <dt>本通话解析行数</dt>
+            <dd>${result.filteredLines}</dd>
+            <dt>发送命中数</dt>
+            <dd>${result.send.matchedLines.length}</dd>
+            <dt>接收命中数</dt>
+            <dd>${result.recv.matchedLines.length}</dd>
+            <dt>成功解码行数</dt>
+            <dd>${decodedLines}（发送 ${result.send.decodedLines}，接收 ${result.recv.decodedLines}）</dd>
+            <dt>跳过行数</dt>
+            <dd>${skippedLines}</dd>
+            <dt>发送PCM写入</dt>
+            <dd>${sendWriteStatus}</dd>
+            <dt>接收PCM写入</dt>
+            <dd>${recvWriteStatus}</dd>
+            ${failureHtml}
+        </dl>
+        ${downloadHtml}
+    `;
+}
+
 function setResult(value) {
     const resultBox = document.getElementById("result");
     resultBox.value = value;
@@ -380,6 +894,7 @@ function attachHandlers() {
 
     attachProtocolTools();
     attachIpValidator();
+    attachAudioPcmParser();
     initToolMenu();
 }
 
@@ -712,3 +1227,154 @@ function attachIpValidator() {
     });
 }
 
+function attachAudioPcmParser() {
+    const fileInput = document.getElementById("audioLogFile");
+    const initialFilterInput = document.getElementById("audioInitialFilter");
+    const sendPrefixInput = document.getElementById("audioSendPrefix");
+    const recvPrefixInput = document.getElementById("audioRecvPrefix");
+    const scanBtn = document.getElementById("scanAudioCallsBtn");
+    const generateBtn = document.getElementById("generateAudioPcmBtn");
+    const callSelect = document.getElementById("audioCallSelect");
+    const clearBtn = document.getElementById("clearAudioPcmBtn");
+    const statusId = "audioPcmStatus";
+    const defaultValues = {
+        initialFilter: "RIL_TT-AT",
+        sendPrefix: "AT^DAUDPCM=",
+        recvPrefix: "^DAUDPCM:",
+    };
+    let scanState = null;
+
+    if (!fileInput || !initialFilterInput || !sendPrefixInput || !recvPrefixInput || !scanBtn || !generateBtn || !callSelect || !clearBtn) {
+        return;
+    }
+
+    const resetCallSelect = (message = "请先扫描通话") => {
+        callSelect.innerHTML = `<option value="">${message}</option>`;
+        callSelect.disabled = true;
+    };
+
+    const renderCallOptions = (calls) => {
+        if (!calls.length) {
+            resetCallSelect("未识别到通话");
+            return;
+        }
+
+        callSelect.disabled = false;
+        callSelect.innerHTML = calls.map((call) => {
+            const endFlag = call.explicitEnd ? "明确结束" : "兜底结束";
+            const label = `#${call.index + 1} ${call.direction} ${call.number} | 行 ${call.startLineNumber}-${call.endLineNumber} | ${endFlag} | 发${call.sendHitCount}/收${call.recvHitCount}`;
+            return `<option value="${call.index}">${escapeHtml(label)}</option>`;
+        }).join("");
+    };
+
+    const readSelectedFileText = async () => {
+        const file = fileInput.files?.[0];
+        if (!file) {
+            renderAudioPcmResult(null);
+            setStatus("请先选择txt日志文件。", "error", statusId);
+            return null;
+        }
+
+        if (!file.name.toLowerCase().endsWith(".txt")) {
+            renderAudioPcmResult(null);
+            setStatus("当前只处理txt日志文件。", "error", statusId);
+            return null;
+        }
+
+        return file.text();
+    };
+
+    scanBtn.addEventListener("click", async () => {
+        const text = await readSelectedFileText();
+        if (text === null) {
+            return;
+        }
+
+        try {
+            setStatus("正在扫描通话...", "info", statusId);
+            scanState = scanAudioCalls(text, {
+                initialFilter: initialFilterInput.value,
+                sendPrefix: sendPrefixInput.value,
+                recvPrefix: recvPrefixInput.value,
+            });
+            renderAudioScanResult(scanState);
+            renderCallOptions(scanState.calls);
+
+            if (scanState.calls.length === 0) {
+                setStatus(`扫描完成：原始 ${scanState.totalLines} 行，初筛 ${scanState.filteredLines} 行，未识别到通话。`, "info", statusId);
+                return;
+            }
+
+            setStatus(`扫描完成：原始 ${scanState.totalLines} 行，初筛 ${scanState.filteredLines} 行，识别到 ${scanState.calls.length} 通电话。`, "success", statusId);
+        } catch (error) {
+            scanState = null;
+            resetCallSelect();
+            renderAudioPcmResult(null);
+            setStatus(error.message, "error", statusId);
+        }
+    });
+
+    generateBtn.addEventListener("click", () => {
+        if (!scanState || !scanState.calls.length) {
+            setStatus("请先扫描通话并选择一通电话。", "error", statusId);
+            return;
+        }
+
+        const selectedIndex = parseInt(callSelect.value, 10);
+        const call = scanState.calls[selectedIndex];
+        if (!call) {
+            setStatus("请选择有效的通话记录。", "error", statusId);
+            return;
+        }
+
+        try {
+            const result = parseAudioPcmEntries(call.entries, {
+                sendPrefix: sendPrefixInput.value,
+                recvPrefix: recvPrefixInput.value,
+                totalLines: scanState.totalLines,
+            });
+            const files = buildAudioDownloadFiles(result, call);
+            renderAudioPcmResult(result, files, call);
+
+            const skippedLines = result.send.skippedLines + result.recv.skippedLines;
+            const skippedText = skippedLines > 0 ? `，跳过 ${skippedLines} 行异常Base64` : "";
+            if (files.length === 0) {
+                setStatus(`生成完成：所选通话没有可写入的PCM数据${skippedText}。`, "info", statusId);
+                return;
+            }
+
+            setStatus(`生成完成：${files.map((file) => file.filename).join("、")}${skippedText}。请在结果区手动下载。`, "success", statusId);
+        } catch (error) {
+            setStatus(error.message, "error", statusId);
+        }
+    });
+
+    clearBtn.addEventListener("click", () => {
+        fileInput.value = "";
+        initialFilterInput.value = defaultValues.initialFilter;
+        sendPrefixInput.value = defaultValues.sendPrefix;
+        recvPrefixInput.value = defaultValues.recvPrefix;
+        scanState = null;
+        resetCallSelect();
+        renderAudioPcmResult(null);
+        setStatus("", "info", statusId);
+    });
+
+    [fileInput, initialFilterInput, sendPrefixInput, recvPrefixInput].forEach((input) => {
+        input.addEventListener("input", () => {
+            scanState = null;
+            resetCallSelect();
+            renderAudioPcmResult(null);
+            setStatus("", "info", statusId);
+        });
+    });
+
+    fileInput.addEventListener("change", () => {
+        scanState = null;
+        resetCallSelect();
+        renderAudioPcmResult(null);
+        setStatus("", "info", statusId);
+    });
+
+    resetCallSelect();
+}
