@@ -465,6 +465,26 @@ function parseIntegerField(value) {
     return parseInt(normalized, 10);
 }
 
+const DSCI_STAT_MAP = {
+    0: "激活",
+    1: "保持",
+    2: "拨号",
+    3: "报警",
+    4: "引入",
+    5: "等待",
+    6: "终止",
+};
+
+function extractLogTimestamp(line) {
+    const match = line.match(/\b\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\b/);
+    return match ? match[0] : "未知时间";
+}
+
+function formatDsciStatus(stat) {
+    const desc = DSCI_STAT_MAP[stat] ?? "未知状态";
+    return stat === null ? "未知状态" : `${stat} ${desc}`;
+}
+
 function parseDsciEvent(line) {
     const marker = "^DSCI:";
     const index = line.indexOf(marker);
@@ -523,14 +543,46 @@ function createCallSegment({ direction, number, startEntry, startIndex, dsciId =
         dsciId,
         startLineNumber: startEntry.lineNumber,
         endLineNumber: startEntry.lineNumber,
+        startTime: extractLogTimestamp(startEntry.line),
+        endTime: extractLogTimestamp(startEntry.line),
         startIndex,
         endIndex: startIndex,
         startReason,
         endReason: "",
         explicitEnd: false,
+        answered: false,
+        answerTime: "",
+        stateChanges: [],
         sendHitCount: 0,
         recvHitCount: 0,
     };
+}
+
+function recordCallStateChange(call, entry, dsci) {
+    if (!call || !dsci || dsci.stat === null) {
+        return;
+    }
+
+    const last = call.stateChanges[call.stateChanges.length - 1];
+    if (last && last.lineNumber === entry.lineNumber && last.stat === dsci.stat) {
+        return;
+    }
+
+    const time = extractLogTimestamp(entry.line);
+    call.stateChanges.push({
+        lineNumber: entry.lineNumber,
+        time,
+        id: dsci.id,
+        idr: dsci.idr,
+        stat: dsci.stat,
+        statusText: formatDsciStatus(dsci.stat),
+        cause: dsci.cause,
+    });
+
+    if (dsci.stat === 0 && !call.answered) {
+        call.answered = true;
+        call.answerTime = time;
+    }
 }
 
 function buildCallSegments(entries, options) {
@@ -558,6 +610,7 @@ function buildCallSegments(entries, options) {
         const audioHits = countAudioHits(entries, call.startIndex, safeEndIndex, sendPrefix, recvPrefix);
         call.endIndex = safeEndIndex;
         call.endLineNumber = entries[safeEndIndex]?.lineNumber ?? call.startLineNumber;
+        call.endTime = entries[safeEndIndex] ? extractLogTimestamp(entries[safeEndIndex].line) : call.startTime;
         call.endReason = reason;
         call.explicitEnd = explicitEnd;
         call.sendHitCount = audioHits.send;
@@ -601,6 +654,7 @@ function buildCallSegments(entries, options) {
             calls.push(call);
             activeCalls.push(call);
             activeById.set(dsci.id, call);
+            recordCallStateChange(call, entry, dsci);
         }
 
         if (dsci && dsci.id !== null && dsci.stat !== 6) {
@@ -611,12 +665,19 @@ function buildCallSegments(entries, options) {
                     pendingOutgoing.number = dsci.number;
                 }
                 activeById.set(dsci.id, pendingOutgoing);
+                recordCallStateChange(pendingOutgoing, entry, dsci);
+            } else {
+                const activeCall = activeById.get(dsci.id);
+                if (activeCall) {
+                    recordCallStateChange(activeCall, entry, dsci);
+                }
             }
         }
 
         if (dsci && dsci.id !== null && dsci.stat === 6) {
             const call = activeById.get(dsci.id) ?? activeCalls[0];
             if (call) {
+                recordCallStateChange(call, entry, dsci);
                 finalizeCall(call, entryIndex, `DSCI状态6终止${dsci.cause !== null ? `，cause=${dsci.cause}` : ""}`, true);
             }
         }
@@ -722,9 +783,15 @@ function renderAudioScanResult(scanResult) {
                 ${scanResult.calls.map((call) => `
                     <div class="call-card">
                         <strong>#${call.index + 1} ${escapeHtml(call.direction)} ${escapeHtml(call.number)}</strong>
-                        <span>行 ${call.startLineNumber} - ${call.endLineNumber}</span>
-                        <span>${escapeHtml(call.endReason)}</span>
+                        <span>开始：${escapeHtml(call.startTime)}（行 ${call.startLineNumber}）</span>
+                        <span>结束：${escapeHtml(call.endTime)}（行 ${call.endLineNumber}，${escapeHtml(call.endReason)}）</span>
+                        <span>接听：${call.answered ? `是，${escapeHtml(call.answerTime)}` : "否"}</span>
                         <span>发送音频 ${call.sendHitCount} 行，接收音频 ${call.recvHitCount} 行</span>
+                        <div class="call-state-list">
+                            ${call.stateChanges.length
+                                ? call.stateChanges.map((state) => `<span>行 ${state.lineNumber} ${escapeHtml(state.time)}：${escapeHtml(state.statusText)}${state.cause !== null ? `，cause=${state.cause}` : ""}</span>`).join("")
+                                : "<span>未记录到DSCI状态变化</span>"}
+                        </div>
                     </div>
                 `).join("")}
             </div>
@@ -766,8 +833,18 @@ function renderAudioPcmResult(result, files = [], call = null) {
         ? `
             <dt>所选通话</dt>
             <dd>#${call.index + 1} ${escapeHtml(call.direction)} ${escapeHtml(call.number)}，行 ${call.startLineNumber} - ${call.endLineNumber}</dd>
+            <dt>开始时间</dt>
+            <dd>${escapeHtml(call.startTime)}</dd>
+            <dt>结束时间</dt>
+            <dd>${escapeHtml(call.endTime)}</dd>
+            <dt>是否接听</dt>
+            <dd>${call.answered ? `是，${escapeHtml(call.answerTime)}` : "否"}</dd>
             <dt>结束状态</dt>
             <dd>${call.explicitEnd ? "明确结束" : "兜底结束"}：${escapeHtml(call.endReason)}</dd>
+            <dt>状态变化</dt>
+            <dd>${call.stateChanges.length
+                ? call.stateChanges.map((state) => `行 ${state.lineNumber} ${escapeHtml(state.time)}：${escapeHtml(state.statusText)}${state.cause !== null ? `，cause=${state.cause}` : ""}`).join("<br>")
+                : "未记录到DSCI状态变化"}</dd>
         `
         : "";
     const sendWriteStatus = result.send.chunks.length > 0
@@ -1262,7 +1339,8 @@ function attachAudioPcmParser() {
         callSelect.disabled = false;
         callSelect.innerHTML = calls.map((call) => {
             const endFlag = call.explicitEnd ? "明确结束" : "兜底结束";
-            const label = `#${call.index + 1} ${call.direction} ${call.number} | 行 ${call.startLineNumber}-${call.endLineNumber} | ${endFlag} | 发${call.sendHitCount}/收${call.recvHitCount}`;
+            const answerFlag = call.answered ? `已接听 ${call.answerTime}` : "未接听";
+            const label = `#${call.index + 1} ${call.direction} ${call.number} | ${call.startTime} -> ${call.endTime} | ${answerFlag} | ${endFlag} | 发${call.sendHitCount}/收${call.recvHitCount}`;
             return `<option value="${call.index}">${escapeHtml(label)}</option>`;
         }).join("");
     };
