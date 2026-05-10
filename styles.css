@@ -587,11 +587,15 @@ footer {
 }
 
 .app-shell.focus-mode .workspace {
-    grid-template-columns: 54px 0 minmax(0, 1fr);
+    grid-template-columns: 54px minmax(0, 1fr);
 }
 
 .app-shell.focus-mode .category-sidebar {
     padding: 10px 7px;
+}
+
+.app-shell.focus-mode .tool-list-pane {
+    display: none;
 }
 
 .app-shell.focus-mode .category-btn {
@@ -601,8 +605,7 @@ footer {
 }
 
 .app-shell.focus-mode .category-btn span:first-child,
-.app-shell.focus-mode .category-count,
-.app-shell.focus-mode .tool-list-pane {
+.app-shell.focus-mode .category-count {
     display: none;
 }
 
@@ -630,9 +633,12 @@ footer {
     }
 
     .workspace,
-    .app-shell.tool-list-collapsed .workspace,
-    .app-shell.focus-mode .workspace {
+    .app-shell.tool-list-collapsed .workspace {
         grid-template-columns: 1fr;
+    }
+
+    .app-shell.focus-mode .workspace {
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .category-sidebar {
@@ -666,6 +672,11 @@ footer {
 
     .app-shell.focus-mode .category-btn::before {
         content: none;
+    }
+
+    .app-shell.focus-mode .category-sidebar,
+    .app-shell.focus-mode .tool-list-pane {
+        display: none;
     }
 
     .tool-workspace {
