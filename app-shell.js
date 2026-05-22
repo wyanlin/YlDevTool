@@ -33,6 +33,13 @@ const TOOL_REGISTRY = [
         tags: ["RIL", "PCM", "日志"],
     },
     {
+        id: "ttlogdiag",
+        category: "log",
+        title: "天通日志诊断",
+        description: "从 Android/RIL 大日志中提取天通电话、语音、短信、功耗关键事件并生成报告。",
+        tags: ["天通", "RIL", "Audio", "功耗"],
+    },
+    {
         id: "converter",
         category: "converter",
         title: "十六进制 ⇄ ASCII",

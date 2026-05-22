@@ -901,6 +901,1509 @@ function setStatus(message, type = "info", targetId = "status") {
     status.dataset.type = type;
 }
 
+const TT_LOG_PROFILE_LABELS = {
+    tt_call: "天通电话事件上报",
+    tt_audio: "Audio语音事件上报",
+    tt_sms: "短信入网事件上报",
+    power_sleep: "功耗休眠事件上报",
+};
+
+const TT_LOG_SOURCE_PRESETS = {
+    tt_default: {
+        atTags: "RIL_TT-AT",
+        rilTags: "RIL_TT",
+        helperKeywords: "AudioService,AudioManager,AudioFlinger,Telecom,InCall,PowerManager,wakelock,wake_lock,modem sleep,CP2AP_WAKEUP,suspend,resume,SMS,CREG,SATSIGNAL",
+        matchRealTagOnly: true,
+        dedupeEnabled: true,
+    },
+};
+
+const TT_LOG_SOURCE_STATE_KEY = "mydevtools.ttLogSourceConfig.v1";
+
+const TT_LOG_SOURCE_LABELS = {
+    at: "原始串口交互",
+    ril: "RIL业务日志",
+    helper: "辅助日志",
+    unknown: "未知来源",
+};
+
+const TT_LOG_SOURCE_PRIORITY = {
+    at: 3,
+    ril: 2,
+    helper: 1,
+    unknown: 0,
+};
+
+const TT_CLCC_STAT_MAP = {
+    0: "通话中",
+    1: "保持",
+    2: "拨号中",
+    3: "振铃中",
+    4: "来电",
+    5: "等待",
+    6: "结束",
+};
+
+const TT_LOG_RULES = [
+    {
+        profile: "tt_call",
+        type: "tt_switch",
+        category: "天通开关",
+        match(line) {
+            const match = line.match(/setTTMode current ttEnable:\s*(\d+)/);
+            if (!match) return null;
+            const enabled = match[1] === "1";
+            return {
+                message: enabled ? "关闭天通开关" : "打开天通开关",
+                fields: { ttEnable: match[1] },
+                severity: "info",
+            };
+        },
+    },
+    {
+        profile: "tt_call",
+        type: "antenna",
+        category: "天线设置",
+        match(line) {
+            const match = line.match(/AT\^VOICERATE=(\d+)/);
+            if (!match) return null;
+            const rate = match[1];
+            return {
+                message: rate === "4" ? "设置为内置天线" : `设置语音天线参数 VOICERATE=${rate}`,
+                fields: { voiceRate: rate },
+                severity: "info",
+            };
+        },
+    },
+    {
+        profile: "tt_call",
+        type: "dial",
+        category: "主叫",
+        match(line) {
+            const event = parseAtdCallStart(line);
+            if (!event) return null;
+            return {
+                message: `发起主叫 ${event.number}`,
+                fields: { number: event.number },
+                severity: "important",
+            };
+        },
+    },
+    {
+        profile: "tt_call",
+        type: "clcc",
+        category: "通话状态",
+        match(line) {
+            const marker = "+CLCC:";
+            const index = line.indexOf(marker);
+            if (index < 0) return null;
+            const fields = splitCsvFields(stripTrailingLogQuote(line.slice(index + marker.length)));
+            const id = parseIntegerField(fields[0]);
+            const idr = parseIntegerField(fields[1]);
+            const stat = parseIntegerField(fields[2]);
+            const number = stripPairedQuotes(fields[5] ?? "");
+            const statusText = TT_CLCC_STAT_MAP[stat] ?? "未知状态";
+            return {
+                message: `${idr === 1 ? "被叫" : "主叫"}通话状态：${statusText}${number ? ` ${number}` : ""}`,
+                fields: { id, idr, stat, number },
+                severity: stat === 6 ? "warning" : "info",
+            };
+        },
+    },
+    {
+        profile: "tt_call",
+        type: "dsci",
+        category: "DSCI状态",
+        match(line) {
+            const dsci = parseDsciEvent(line);
+            if (!dsci) return null;
+            const statusText = DSCI_STAT_MAP[dsci.stat] ?? "未知状态";
+            const direction = dsci.idr === 1 ? "被叫" : "主叫";
+            const causeText = dsci.cause !== null ? `，cause=${dsci.cause}` : "";
+            return {
+                message: `${direction}DSCI状态：${statusText}${dsci.number ? ` ${dsci.number}` : ""}${causeText}`,
+                fields: dsci,
+                severity: dsci.stat === 6 ? "warning" : "important",
+            };
+        },
+    },
+    {
+        profile: "tt_call",
+        type: "carrier_release",
+        category: "链路释放",
+        match(line) {
+            if (!line.includes("NO CARRIER")) return null;
+            return {
+                message: "链路释放 NO CARRIER",
+                fields: {},
+                severity: "warning",
+            };
+        },
+    },
+    {
+        profile: "tt_call",
+        type: "network_state",
+        category: "网络状态",
+        match(line) {
+            const creg = line.match(/\+CREG:\s*([^,\s]+),?([^\s]*)?/);
+            if (!creg) return null;
+            return {
+                message: `网络注册状态 CREG=${creg[1]}${creg[2] ? `,${creg[2]}` : ""}`,
+                fields: { creg: creg[0] },
+                severity: "info",
+            };
+        },
+    },
+    {
+        profile: "tt_call",
+        type: "signal",
+        category: "信号",
+        match(line) {
+            const signal = line.match(/\^SATSIGNAL:\s*(-?\d+),(\d+)/);
+            if (!signal) return null;
+            return {
+                message: `天通信号 rssi=${signal[1]}, snr=${signal[2]}`,
+                fields: { rssi: signal[1], snr: signal[2] },
+                severity: "info",
+            };
+        },
+    },
+    {
+        profile: "tt_audio",
+        type: "audio_route",
+        category: "Audio",
+        match(line) {
+            if (!/(AudioService|AudioManager|AudioFlinger|AudioFocus|MODE_IN_COMMUNICATION|speaker|route)/i.test(line)) {
+                return null;
+            }
+            return {
+                message: "Audio语音链路事件",
+                fields: {},
+                severity: /fail|error|denied/i.test(line) ? "warning" : "info",
+            };
+        },
+    },
+    {
+        profile: "power_sleep",
+        type: "power",
+        category: "功耗休眠",
+        match(line) {
+            if (!/(wakelock|wake_lock|screen state|SCREEN_|modem sleep|CP2AP_WAKEUP|suspend|resume)/i.test(line)) {
+                return null;
+            }
+            return {
+                message: "功耗/休眠链路事件",
+                fields: {},
+                severity: /timeout|fail|abort/i.test(line) ? "warning" : "info",
+            };
+        },
+    },
+    {
+        profile: "tt_sms",
+        type: "sms",
+        category: "短信入网",
+        match(line) {
+            if (!/(\+CMT|\+CMGL|\+CMGS|SMS|NEW_SMS|CMTI|CREG|SATSIGNAL)/i.test(line)) {
+                return null;
+            }
+            return {
+                message: "短信/入网相关事件",
+                fields: {},
+                severity: /fail|error/i.test(line) ? "warning" : "info",
+            };
+        },
+    },
+];
+
+// ==================== 逐行注解：AT 指令字典 ====================
+const TT_AT_COMMAND_DICT = {
+    "+CREG":       { name: "网络注册状态",      desc: "查询或上报网络注册状态，0=未注册 1=已注册本地 2=正在搜索 3=注册被拒绝 5=已注册漫游" },
+    "^SATSIGNAL":  { name: "卫星信号强度",      desc: "主动查询或URC上报天通卫星信号，返回 RSSI(dBm) 和 SNR(dB)" },
+    "^VOICERATE":  { name: "语音天线速率",      desc: "设置语音天线编码速率，4=内置天线模式 5=外置天线模式" },
+    "^DSCI":       { name: "通话状态变化",      desc: "URC上报通话状态变化：0=激活 1=保持 2=拨号 3=报警 4=引入 5=等待 6=终止" },
+    "+CLCC":       { name: "当前通话列表",      desc: "查询当前通话列表，返回通话ID、方向、状态、号码、类型" },
+    "+CMGS":       { name: "发送短信",          desc: "发送短信指令，后跟PDU编码的短信内容" },
+    "+CMGL":       { name: "列出短信",          desc: "从短信存储中按状态列出短信" },
+    "+CMGR":       { name: "读取短信",          desc: "从存储中读取指定索引的短信" },
+    "+CMGD":       { name: "删除短信",          desc: "删除存储中指定索引的短信" },
+    "+CNMI":       { name: "新消息指示",        desc: "设置新短信到达时的URC上报行为" },
+    "+CPMS":       { name: "短信存储位置",      desc: "选择短信读写存储位置（ME/SM）" },
+    "+CSQ":        { name: "信号质量查询",      desc: "查询信号质量，返回 RSSI 和 BER（误码率）" },
+    "+CPIN":       { name: "PIN码管理",         desc: "输入或验证SIM卡PIN码以解锁" },
+    "+CPAS":       { name: "电话活动状态",      desc: "查询电话活动状态：0=就绪 3=振铃 4=通话中" },
+    "+CFUN":       { name: "模块功能设置",      desc: "设置模块功能级别：0=最小功能 1=全功能 4=飞行模式" },
+    "+CMEE":       { name: "错误报告格式",      desc: "设置错误报告格式：0=关闭 1=数字错误码 2=详细文字描述" },
+    "+CGATT":      { name: "GPRS附着/分离",     desc: "附着或分离GPRS数据服务" },
+    "+COPS":       { name: "运营商选择",        desc: "查询或选择网络运营商" },
+    "+CLIP":       { name: "来电显示设置",      desc: "启用或禁用来电号码显示URC" },
+    "+CCWA":       { name: "呼叫等待设置",      desc: "启用或禁用呼叫等待功能" },
+    "+CHLD":       { name: "呼叫保持/多方通话", desc: "呼叫保持、释放、切换及多方通话控制" },
+    "+CSCS":       { name: "字符集设置",        desc: "设置TE字符集编码" },
+    "+CGMR":       { name: "模块版本查询",      desc: "查询模块固件版本信息" },
+    "+CGSN":       { name: "IMEI查询",          desc: "查询模块IMEI序列号" },
+    "+CIMI":       { name: "IMSI查询",          desc: "查询SIM卡IMSI" },
+    "+CBC":        { name: "小区广播",          desc: "小区广播消息相关指令" },
+    "+CUSD":       { name: "非结构化补充数据",  desc: "USSD非结构化补充业务数据" },
+    "+CRES":       { name: "恢复网络注册",      desc: "恢复网络注册URC上报" },
+    "+CRSM":       { name: "受限SIM访问",       desc: "受限方式访问SIM卡EF文件" },
+    "NO CARRIER":  { name: "链路释放",          desc: "数据/语音链路因挂断、无信号或其他原因被释放" },
+    "DAUDPCM":     { name: "音频PCM数据",       desc: "通过串口传输音频PCM数据（Base64编码）" },
+    "BUSY":        { name: "线路忙",            desc: "被叫线路忙" },
+    "NO ANSWER":   { name: "无应答",            desc: "被叫无应答" },
+    "ERROR":       { name: "指令错误",          desc: "AT指令执行返回错误" },
+    "OK":          { name: "指令成功",          desc: "AT指令执行成功" },
+};
+
+// ==================== 逐行注解：辅助解释函数 ====================
+function interpretRssi(rssi) {
+    if (rssi >= -70) return "强信号";
+    if (rssi >= -85) return "中等信号";
+    if (rssi >= -100) return "弱信号";
+    return "信号极弱";
+}
+
+function interpretSnr(snr) {
+    if (snr >= 20) return "信噪比优秀";
+    if (snr >= 10) return "信噪比良好";
+    if (snr >= 5) return "信噪比较低";
+    return "信噪比差";
+}
+
+function interpretCregState(state) {
+    var map = { 0: "未注册，不在搜索中", 1: "已注册本地网络", 2: "正在搜索网络", 3: "注册被拒绝", 4: "未知状态", 5: "已注册漫游网络" };
+    return map[state] || "未知状态(" + state + ")";
+}
+
+function interpretClccStat(stat) {
+    return TT_CLCC_STAT_MAP[stat] || "未知状态(" + stat + ")";
+}
+
+function parseAtCommandsFromLine(line) {
+    var results = [];
+    var pattern = /(?:AT([+^][A-Z]+)|AT(D)(\d+)?|(?:ATS)(\d+)|(NO\s+CARRIER)|(BUSY)|(NO\s+ANSWER)|(?<!\w)(ERROR)(?!\w)|(?<!\w)(OK)(?!\w))/gi;
+    var match;
+    while ((match = pattern.exec(line)) !== null) {
+        var basename = match[1] || match[2] || ("S" + (match[5] || "")) || match[6] || match[7] || match[8] || match[9] || "";
+        var raw = match[0].toUpperCase();
+        var entry = TT_AT_COMMAND_DICT[basename] || null;
+        results.push({ raw: raw, basename: basename, entry: entry });
+    }
+    return results;
+}
+
+// ==================== 逐行注解：注解器 ====================
+var TT_LOG_ANNOTATORS = [
+    {
+        type: "at_command",
+        category: "AT命令识别",
+        match: function (line) {
+            var cmds = parseAtCommandsFromLine(line);
+            if (!cmds.length) return null;
+            return {
+                annotations: cmds.map(function (c) {
+                    return {
+                        text: c.entry ? c.raw + ": " + c.entry.name + " — " + c.entry.desc : c.raw + ": 未收录的AT指令",
+                        severity: "info",
+                    };
+                }),
+            };
+        },
+    },
+    {
+        type: "tt_mode",
+        category: "天通模式",
+        match: function (line) {
+            var m = line.match(/setTTMode current ttEnable:\s*(\d+)/);
+            if (!m) return null;
+            var enabled = m[1] === "1";
+            return {
+                annotations: [{
+                    text: enabled ? "天通已启用 (ttEnable=1)，模组进入卫星通信模式" : "天通已关闭 (ttEnable=0)，模组退回地面模式",
+                    severity: "important",
+                }],
+            };
+        },
+    },
+    {
+        type: "signal",
+        category: "信号强度",
+        match: function (line) {
+            var m = line.match(/\^SATSIGNAL:\s*(-?\d+),(\d+)/);
+            if (!m) return null;
+            var rssi = parseInt(m[1], 10);
+            var snr = parseInt(m[2], 10);
+            return {
+                annotations: [{
+                    text: "RSSI=" + rssi + "dBm (" + interpretRssi(rssi) + "), SNR=" + snr + "dB (" + interpretSnr(snr) + ")",
+                    severity: rssi < -100 ? "warning" : "info",
+                    fields: { rssi: rssi, snr: snr },
+                }],
+            };
+        },
+    },
+    {
+        type: "network_state",
+        category: "网络注册",
+        match: function (line) {
+            var m = line.match(/\+CREG:\s*(\d+)/);
+            if (!m) return null;
+            var state = parseInt(m[1], 10);
+            return {
+                annotations: [{
+                    text: "网络注册状态变化: " + interpretCregState(state),
+                    severity: (state === 1 || state === 5) ? "info" : "warning",
+                    fields: { cregState: state },
+                }],
+            };
+        },
+    },
+    {
+        type: "antenna",
+        category: "天线设置",
+        match: function (line) {
+            var m = line.match(/AT\^VOICERATE=(\d+)/);
+            if (!m) return null;
+            var rate = m[1];
+            return {
+                annotations: [{
+                    text: rate === "4" ? "设置为内置天线 (VOICERATE=4)" : "设置为外置天线 (VOICERATE=" + rate + ")",
+                    severity: "info",
+                }],
+            };
+        },
+    },
+    {
+        type: "call_dial",
+        category: "主叫",
+        match: function (line) {
+            var event = parseAtdCallStart(line);
+            if (!event) return null;
+            return {
+                annotations: [{
+                    text: "发起主叫，被叫号码: " + event.number,
+                    severity: "important",
+                    fields: { number: event.number },
+                }],
+            };
+        },
+    },
+    {
+        type: "call_state",
+        category: "通话状态",
+        match: function (line) {
+            var marker = "+CLCC:";
+            var index = line.indexOf(marker);
+            if (index < 0) return null;
+            var fields = splitCsvFields(stripTrailingLogQuote(line.slice(index + marker.length)));
+            var id = parseIntegerField(fields[0]);
+            var idr = parseIntegerField(fields[1]);
+            var stat = parseIntegerField(fields[2]);
+            var number = stripPairedQuotes(fields[5] || "");
+            var statusText = interpretClccStat(stat);
+            return {
+                annotations: [{
+                    text: (idr === 1 ? "被叫" : "主叫") + "通话状态变化: " + statusText + (number ? " " + number : ""),
+                    severity: stat === 6 ? "warning" : "info",
+                    fields: { id: id, idr: idr, stat: stat, number: number },
+                }],
+            };
+        },
+    },
+    {
+        type: "call_dsci",
+        category: "通话状态",
+        match: function (line) {
+            var dsci = parseDsciEvent(line);
+            if (!dsci) return null;
+            var statusText = DSCI_STAT_MAP[dsci.stat] || "未知状态";
+            var direction = dsci.idr === 1 ? "被叫" : "主叫";
+            var causeText = dsci.cause !== null ? "，cause=" + dsci.cause : "";
+            return {
+                annotations: [{
+                    text: direction + "DSCI状态变化: " + statusText + (dsci.number ? " " + dsci.number : "") + causeText,
+                    severity: dsci.stat === 6 ? "warning" : "important",
+                    fields: dsci,
+                }],
+            };
+        },
+    },
+    {
+        type: "call_release",
+        category: "链路释放",
+        match: function (line) {
+            if (line.indexOf("NO CARRIER") < 0) return null;
+            return {
+                annotations: [{
+                    text: "链路释放（NO CARRIER），通话或数据连接已断开",
+                    severity: "warning",
+                }],
+            };
+        },
+    },
+    {
+        type: "process",
+        category: "进程事件",
+        match: function (line) {
+            var startMatch = line.match(/start\s+(\S*rild\S*)/i);
+            if (startMatch) {
+                return {
+                    annotations: [{
+                        text: "启动进程: " + startMatch[1] + "，负责卫星通信RIL层交互",
+                        severity: "info",
+                    }],
+                };
+            }
+            if (/died|killed|crash/i.test(line)) {
+                return {
+                    annotations: [{
+                        text: "进程异常终止（died/killed/crash），可能导致卫星服务中断",
+                        severity: "warning",
+                    }],
+                };
+            }
+            if (/ANR\s+in\s+(\S+)/i.test(line)) {
+                return {
+                    annotations: [{
+                        text: "应用无响应(ANR): " + (line.match(/ANR\s+in\s+(\S+)/i) || [])[1] + "，主线程阻塞超过5秒",
+                        severity: "warning",
+                    }],
+                };
+            }
+            return null;
+        },
+    },
+    {
+        type: "sms",
+        category: "短信事件",
+        match: function (line) {
+            var cmtMatch = line.match(/\+CMT:\s*"([^"]*)"/);
+            if (cmtMatch) {
+                return {
+                    annotations: [{
+                        text: "收到新短信 (CMT)，发件人: " + cmtMatch[1],
+                        severity: "important",
+                    }],
+                };
+            }
+            if (line.indexOf("+CMTI:") >= 0) {
+                return {
+                    annotations: [{
+                        text: "新短信到达指示 (CMTI)，短信已存储在SIM卡或模块内存",
+                        severity: "info",
+                    }],
+                };
+            }
+            if (line.indexOf("+CMGS:") >= 0) {
+                return {
+                    annotations: [{
+                        text: "短信发送成功 (CMGS)",
+                        severity: "info",
+                    }],
+                };
+            }
+            return null;
+        },
+    },
+    {
+        type: "error",
+        category: "异常检测",
+        match: function (line) {
+            if (!/(fail|error|timeout|abort|denied|reject|exception|crash)/i.test(line)) return null;
+            return {
+                annotations: [{
+                    text: "包含异常/失败关键词，可能指示一个问题",
+                    severity: "warning",
+                }],
+            };
+        },
+    },
+];
+
+// ==================== 逐行注解：状态追踪器 ====================
+var TT_LOG_STATE_TRACKERS = [
+    {
+        id: "signal",
+        label: "信号强度",
+        extract: function (line, lineNumber) {
+            var m = line.match(/\^SATSIGNAL:\s*(-?\d+),(\d+)/);
+            if (!m) return null;
+            return {
+                time: extractLogTimestamp(line),
+                lineNumber: lineNumber,
+                rssi: parseInt(m[1], 10),
+                snr: parseInt(m[2], 10),
+            };
+        },
+    },
+    {
+        id: "network",
+        label: "网络注册",
+        extract: function (line, lineNumber) {
+            var m = line.match(/\+CREG:\s*(\d+)/);
+            if (!m) return null;
+            var state = parseInt(m[1], 10);
+            return {
+                time: extractLogTimestamp(line),
+                lineNumber: lineNumber,
+                state: state,
+                label: interpretCregState(state),
+            };
+        },
+    },
+    {
+        id: "call",
+        label: "通话状态",
+        extract: function (line, lineNumber) {
+            var dsci = parseDsciEvent(line);
+            if (!dsci) return null;
+            return {
+                time: extractLogTimestamp(line),
+                lineNumber: lineNumber,
+                id: dsci.id,
+                idr: dsci.idr,
+                stat: dsci.stat,
+                number: dsci.number,
+                label: (DSCI_STAT_MAP[dsci.stat] || "未知") + (dsci.number ? " " + dsci.number : ""),
+            };
+        },
+    },
+];
+
+var ttLogReportDownloadUrl = "";
+let ttLogConfigDownloadUrl = "";
+
+function parseTtLogLine(line, lineNumber) {
+    const timestamp = extractLogTimestamp(line);
+    const match = line.match(/\b\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+[A-Z]\s+([^:]+):/);
+    return {
+        line,
+        lineNumber,
+        time: timestamp,
+        tag: match ? match[1].trim() : "未知Tag",
+    };
+}
+
+function parseTtLogFilters(value) {
+    if (Array.isArray(value)) return value;
+    return String(value ?? "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+function buildTtLogSourceConfig(options) {
+    return {
+        preset: options.preset || "tt_default",
+        atTags: parseTtLogFilters(options.atTags ?? ""),
+        rilTags: parseTtLogFilters(options.rilTags ?? ""),
+        helperKeywords: parseTtLogFilters(options.helperKeywords ?? ""),
+        matchRealTagOnly: Boolean(options.matchRealTagOnly),
+        dedupeEnabled: Boolean(options.dedupeEnabled),
+    };
+}
+
+function saveTtLogSourceConfig(config) {
+    try {
+        localStorage.setItem(TT_LOG_SOURCE_STATE_KEY, JSON.stringify(config));
+    } catch (error) {
+        // Ignore storage failures; scanning should still work.
+    }
+}
+
+function loadTtLogSourceConfig() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(TT_LOG_SOURCE_STATE_KEY) || "null");
+        if (saved && typeof saved === "object") {
+            return saved;
+        }
+    } catch (error) {
+        // Fall back to the built-in preset.
+    }
+    return {
+        preset: "tt_default",
+        ...TT_LOG_SOURCE_PRESETS.tt_default,
+    };
+}
+
+function releaseTtLogConfigDownloadUrl() {
+    if (ttLogConfigDownloadUrl) {
+        URL.revokeObjectURL(ttLogConfigDownloadUrl);
+        ttLogConfigDownloadUrl = "";
+    }
+}
+
+function exportTtLogSourceConfigFile(config) {
+    releaseTtLogConfigDownloadUrl();
+    const payload = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        type: "tt-log-source-config",
+        config,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    ttLogConfigDownloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = ttLogConfigDownloadUrl;
+    link.download = "tt-log-source-config.json";
+    link.click();
+}
+
+async function importTtLogSourceConfigFile(file) {
+    const text = await file.text();
+    let payload = null;
+    try {
+        payload = JSON.parse(text);
+    } catch (error) {
+        throw new Error("配置文件不是有效 JSON。");
+    }
+
+    const config = payload?.config ?? payload;
+    if (!config || typeof config !== "object") {
+        throw new Error("配置文件缺少 config 对象。");
+    }
+
+    const normalized = {
+        preset: typeof config.preset === "string" ? config.preset : "custom",
+        atTags: typeof config.atTags === "string" ? config.atTags : "",
+        rilTags: typeof config.rilTags === "string" ? config.rilTags : "",
+        helperKeywords: typeof config.helperKeywords === "string" ? config.helperKeywords : "",
+        matchRealTagOnly: config.matchRealTagOnly !== false,
+        dedupeEnabled: config.dedupeEnabled !== false,
+    };
+
+    if (!normalized.atTags && !normalized.rilTags && !normalized.helperKeywords) {
+        throw new Error("配置文件至少需要包含一个 TAG 或关键词。");
+    }
+
+    return normalized;
+}
+
+function tagStartsWithAny(tag, prefixes) {
+    return prefixes.some((prefix) => prefix && tag.startsWith(prefix));
+}
+
+function classifyTtLogSource(parsed, sourceConfig) {
+    if (tagStartsWithAny(parsed.tag, sourceConfig.atTags)) {
+        return { kind: "at", label: TT_LOG_SOURCE_LABELS.at };
+    }
+    if (tagStartsWithAny(parsed.tag, sourceConfig.rilTags)) {
+        return { kind: "ril", label: TT_LOG_SOURCE_LABELS.ril };
+    }
+    if (sourceConfig.helperKeywords.some((keyword) => parsed.tag.startsWith(keyword) || parsed.line.includes(keyword))) {
+        return { kind: "helper", label: TT_LOG_SOURCE_LABELS.helper };
+    }
+    return { kind: "unknown", label: TT_LOG_SOURCE_LABELS.unknown };
+}
+
+function ttLogLineMatchesSource(parsed, sourceConfig) {
+    const source = classifyTtLogSource(parsed, sourceConfig);
+    if (source.kind === "at" || source.kind === "ril") {
+        return source;
+    }
+    if (!sourceConfig.matchRealTagOnly && source.kind === "helper") {
+        return source;
+    }
+    if (sourceConfig.matchRealTagOnly && source.kind === "helper") {
+        return source;
+    }
+    return null;
+}
+
+function normalizeTtLogPayload(value) {
+    return String(value ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function getTtLogEventFingerprint(event) {
+    const fields = event.fields ?? {};
+    switch (event.type) {
+        case "dsci":
+            return `dsci:${fields.id}:${fields.idr}:${fields.stat}:${fields.number}:${fields.cause}`;
+        case "clcc":
+            return `clcc:${fields.id}:${fields.idr}:${fields.stat}:${fields.number}`;
+        case "dial":
+            return `dial:${fields.number}`;
+        case "antenna":
+            return `antenna:${fields.voiceRate}`;
+        case "carrier_release":
+            return "carrier_release:NO_CARRIER";
+        case "tt_switch":
+            return `tt_switch:${fields.ttEnable}`;
+        default:
+            return `${event.type}:${normalizeTtLogPayload(event.message)}`;
+    }
+}
+
+function getTtLogEventTimeBucket(event) {
+    const match = String(event.time ?? "").match(/^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/);
+    return match ? match[1] : event.time;
+}
+
+function dedupeTtLogEvents(events) {
+    const byKey = new Map();
+    let duplicateCount = 0;
+
+    events.forEach((event) => {
+        const key = `${getTtLogEventTimeBucket(event)}|${getTtLogEventFingerprint(event)}`;
+        const existing = byKey.get(key);
+        if (!existing) {
+            byKey.set(key, { ...event, duplicateCount: 0 });
+            return;
+        }
+
+        duplicateCount += 1;
+        const existingPriority = TT_LOG_SOURCE_PRIORITY[existing.sourceKind] ?? 0;
+        const eventPriority = TT_LOG_SOURCE_PRIORITY[event.sourceKind] ?? 0;
+        if (eventPriority > existingPriority) {
+            byKey.set(key, { ...event, duplicateCount: existing.duplicateCount + 1 });
+        } else {
+            existing.duplicateCount += 1;
+        }
+    });
+
+    return {
+        events: [...byKey.values()].sort((left, right) => left.lineNumber - right.lineNumber),
+        duplicateCount,
+    };
+}
+
+function scanTtLogEvents(text, options) {
+    const selectedProfiles = new Set(options.profiles);
+    const sourceConfig = buildTtLogSourceConfig(options.sourceConfig ?? {});
+    const rules = TT_LOG_RULES.filter((rule) => selectedProfiles.has(rule.profile));
+    const lines = splitLogLines(text);
+    const events = [];
+    let filteredLines = 0;
+
+    lines.forEach((line, index) => {
+        const parsed = parseTtLogLine(line, index + 1);
+        const source = ttLogLineMatchesSource(parsed, sourceConfig);
+        if (!source) {
+            return;
+        }
+        filteredLines += 1;
+
+        for (const rule of rules) {
+            if (sourceConfig.matchRealTagOnly && rule.profile === "tt_call" && source.kind === "helper") {
+                continue;
+            }
+            const matched = rule.match(line);
+            if (!matched) {
+                continue;
+            }
+            events.push({
+                ...parsed,
+                profile: rule.profile,
+                profileLabel: TT_LOG_PROFILE_LABELS[rule.profile] ?? rule.profile,
+                type: rule.type,
+                category: rule.category,
+                message: matched.message,
+                fields: matched.fields ?? {},
+                severity: matched.severity ?? "info",
+                sourceKind: source.kind,
+                sourceLabel: source.label,
+            });
+        }
+    });
+
+    const dedupeResult = sourceConfig.dedupeEnabled ? dedupeTtLogEvents(events) : { events, duplicateCount: 0 };
+
+    return {
+        totalLines: lines.length,
+        filteredLines,
+        profiles: [...selectedProfiles],
+        sourceConfig,
+        events: dedupeResult.events,
+        rawEventCount: events.length,
+        duplicateCount: dedupeResult.duplicateCount,
+    };
+}
+
+function summarizeTtLogEvents(scanResult) {
+    const summary = {
+        totalLines: scanResult?.totalLines ?? 0,
+        filteredLines: scanResult?.filteredLines ?? 0,
+        totalEvents: scanResult?.events.length ?? 0,
+        rawEventCount: scanResult?.rawEventCount ?? 0,
+        duplicateCount: scanResult?.duplicateCount ?? 0,
+        warnings: 0,
+        byProfile: {},
+        byCategory: {},
+    };
+
+    (scanResult?.events ?? []).forEach((event) => {
+        if (event.severity === "warning") {
+            summary.warnings += 1;
+        }
+        summary.byProfile[event.profileLabel] = (summary.byProfile[event.profileLabel] ?? 0) + 1;
+        summary.byCategory[event.category] = (summary.byCategory[event.category] ?? 0) + 1;
+    });
+
+    return summary;
+}
+
+function renderTtLogSummary(scanResult) {
+    const container = document.getElementById("ttLogSummary");
+    if (!container) return;
+    if (!scanResult) {
+        container.innerHTML = "";
+        return;
+    }
+
+    const summary = summarizeTtLogEvents(scanResult);
+    const cards = [
+        ["总行数", summary.totalLines],
+        ["初筛行数", summary.filteredLines],
+        ["命中事件", summary.totalEvents],
+        ["合并重复", summary.duplicateCount],
+        ["风险/失败事件", summary.warnings],
+        ...Object.entries(summary.byProfile),
+        ...Object.entries(summary.byCategory),
+    ];
+
+    container.innerHTML = cards.map(([label, value]) => `
+        <div class="metric-card">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+        </div>
+    `).join("");
+}
+
+function renderTtLogTimeline(scanResult) {
+    const container = document.getElementById("ttLogTimeline");
+    if (!container) return;
+    if (!scanResult || scanResult.events.length === 0) {
+        container.innerHTML = "";
+        return;
+    }
+
+    container.innerHTML = scanResult.events.map((event) => `
+        <article class="timeline-item timeline-${escapeHtml(event.severity)}">
+            <div class="timeline-main">
+                <strong>${escapeHtml(event.time)}</strong>
+                <span>${escapeHtml(event.message)}</span>
+            </div>
+            <div class="timeline-meta">行 ${event.lineNumber} | ${escapeHtml(event.tag)} | ${escapeHtml(event.sourceLabel)} | ${escapeHtml(event.profileLabel)} / ${escapeHtml(event.category)}${event.duplicateCount ? ` | 已合并重复 ${event.duplicateCount} 条` : ""}</div>
+            <code>${escapeHtml(event.line)}</code>
+        </article>
+    `).join("");
+}
+
+function buildTtLogMarkdownReport(scanResult) {
+    if (!scanResult || scanResult.events.length === 0) {
+        return "";
+    }
+
+    const summary = summarizeTtLogEvents(scanResult);
+    const lines = [
+        "# 天通日志诊断报告",
+        "",
+        "## 事件概览",
+        "",
+        `- 总行数：${summary.totalLines}`,
+        `- 初筛行数：${summary.filteredLines}`,
+        `- 命中事件：${summary.totalEvents}`,
+        `- 原始命中：${summary.rawEventCount}`,
+        `- 合并重复：${summary.duplicateCount}`,
+        `- 风险/失败事件：${summary.warnings}`,
+        "",
+        "## 关键时间线",
+        "",
+    ];
+
+    scanResult.events.forEach((event) => {
+        lines.push(`- ${event.time} ${event.message}`);
+        lines.push(`  - 行 ${event.lineNumber} | ${event.tag} | ${event.sourceLabel} | ${event.profileLabel} / ${event.category}${event.duplicateCount ? ` | 已合并重复 ${event.duplicateCount} 条` : ""}`);
+        lines.push(`  - ${event.line}`);
+    });
+
+    lines.push("");
+    lines.push("## 初步结论");
+    lines.push("");
+    if (summary.warnings > 0) {
+        lines.push("- 日志中存在释放、失败或异常类事件，建议优先围绕上述风险事件前后 30 秒补充分析。");
+    } else {
+        lines.push("- 当前规则未识别到明确失败事件，需要结合业务现象继续扩展规则或补充日志。");
+    }
+    lines.push("");
+    lines.push("## 建议补充日志");
+    lines.push("");
+    lines.push("- 若分析电话问题，补充 ATD、CLCC、DSCI、NO CARRIER、CREG、SATSIGNAL 前后完整片段。");
+    lines.push("- 若分析语音问题，补充 AudioService、AudioManager、AudioFlinger、AudioFocus 和路由切换日志。");
+    lines.push("- 若分析功耗问题，补充 screen state、wakelock、modem sleep timer、CP2AP_WAKEUP、suspend/resume 日志。");
+
+    return lines.join("\n");
+}
+
+function releaseTtLogReportDownloadUrl() {
+    if (ttLogReportDownloadUrl) {
+        URL.revokeObjectURL(ttLogReportDownloadUrl);
+        ttLogReportDownloadUrl = "";
+    }
+    releaseTtLogConfigDownloadUrl();
+}
+
+function downloadTtLogReport(report) {
+    releaseTtLogReportDownloadUrl();
+    const blob = new Blob([report], { type: "text/markdown;charset=utf-8" });
+    ttLogReportDownloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = ttLogReportDownloadUrl;
+    link.download = "tt-log-diagnostic-report.md";
+    link.click();
+}
+
+// ==================== 逐行注解：核心扫描函数 ====================
+function scanTtLogAnnotations(text, options) {
+    var sourceConfig = buildTtLogSourceConfig(options.sourceConfig || {});
+    var lines = splitLogLines(text);
+    var annotatedLines = [];
+    var filteredLines = 0;
+
+    lines.forEach(function (line, index) {
+        var parsed = parseTtLogLine(line, index + 1);
+        var source = ttLogLineMatchesSource(parsed, sourceConfig);
+        if (!source) return;
+        filteredLines += 1;
+
+        var annotations = [];
+        for (var i = 0; i < TT_LOG_ANNOTATORS.length; i++) {
+            var result = TT_LOG_ANNOTATORS[i].match(line);
+            if (result && result.annotations) {
+                for (var j = 0; j < result.annotations.length; j++) {
+                    annotations.push({
+                        type: TT_LOG_ANNOTATORS[i].type,
+                        category: TT_LOG_ANNOTATORS[i].category,
+                        text: result.annotations[j].text,
+                        severity: result.annotations[j].severity || "info",
+                        fields: result.annotations[j].fields || {},
+                    });
+                }
+            }
+        }
+
+        if (annotations.length > 0) {
+            annotatedLines.push({
+                lineNumber: parsed.lineNumber,
+                time: parsed.time,
+                tag: parsed.tag,
+                line: line,
+                sourceKind: source.kind,
+                sourceLabel: source.label,
+                annotations: annotations,
+            });
+        }
+    });
+
+    var totalAnnotations = annotatedLines.reduce(function (sum, l) { return sum + l.annotations.length; }, 0);
+
+    return {
+        totalLines: lines.length,
+        filteredLines: filteredLines,
+        annotatedLines: annotatedLines,
+        annotationCount: totalAnnotations,
+        sourceConfig: sourceConfig,
+    };
+}
+
+// ==================== 逐行注解：状态提取与汇总 ====================
+function extractTtLogStateSnapshots(text) {
+    var lines = splitLogLines(text);
+    var snapshots = {};
+    for (var i = 0; i < TT_LOG_STATE_TRACKERS.length; i++) {
+        snapshots[TT_LOG_STATE_TRACKERS[i].id] = [];
+    }
+
+    lines.forEach(function (line, index) {
+        for (var i = 0; i < TT_LOG_STATE_TRACKERS.length; i++) {
+            var result = TT_LOG_STATE_TRACKERS[i].extract(line, index + 1);
+            if (result) {
+                snapshots[TT_LOG_STATE_TRACKERS[i].id].push(result);
+            }
+        }
+    });
+
+    return snapshots;
+}
+
+function summarizeTtLogStateChanges(snapshots) {
+    var summaries = {};
+
+    for (var i = 0; i < TT_LOG_STATE_TRACKERS.length; i++) {
+        var tracker = TT_LOG_STATE_TRACKERS[i];
+        var samples = snapshots[tracker.id] || [];
+
+        if (samples.length === 0) {
+            summaries[tracker.id] = { label: tracker.label, sampleCount: 0, empty: true };
+            continue;
+        }
+
+        if (tracker.id === "signal") {
+            var rssiVals = samples.map(function (s) { return s.rssi; });
+            summaries[tracker.id] = {
+                label: tracker.label,
+                sampleCount: samples.length,
+                first: samples[0],
+                last: samples[samples.length - 1],
+                rssiMin: Math.min.apply(null, rssiVals),
+                rssiMax: Math.max.apply(null, rssiVals),
+                rssiAvg: Math.round(rssiVals.reduce(function (a, b) { return a + b; }, 0) / rssiVals.length),
+                trend: rssiVals[rssiVals.length - 1] - rssiVals[0],
+                samples: samples,
+            };
+        } else if (tracker.id === "network") {
+            var changes = [];
+            var prev = null;
+            for (var j = 0; j < samples.length; j++) {
+                if (!prev || prev.state !== samples[j].state) {
+                    changes.push(samples[j]);
+                }
+                prev = samples[j];
+            }
+            summaries[tracker.id] = {
+                label: tracker.label,
+                sampleCount: samples.length,
+                changeCount: changes.length,
+                currentState: samples[samples.length - 1],
+                changes: changes,
+            };
+        } else if (tracker.id === "call") {
+            summaries[tracker.id] = {
+                label: tracker.label,
+                sampleCount: samples.length,
+                samples: samples,
+            };
+        } else {
+            summaries[tracker.id] = {
+                label: tracker.label,
+                sampleCount: samples.length,
+                empty: false,
+            };
+        }
+    }
+
+    return summaries;
+}
+
+// ==================== 逐行注解：渲染函数 ====================
+function renderTtLogAnnotationSummary(annotationResult) {
+    var container = document.getElementById("ttLogAnnotationSummary");
+    if (!container) return;
+    if (!annotationResult) {
+        container.innerHTML = "";
+        return;
+    }
+
+    var byCategory = {};
+    annotationResult.annotatedLines.forEach(function (item) {
+        item.annotations.forEach(function (ann) {
+            byCategory[ann.category] = (byCategory[ann.category] || 0) + 1;
+        });
+    });
+
+    var cards = [
+        ["注解行数", annotationResult.annotatedLines.length],
+        ["注解总数", annotationResult.annotationCount],
+    ];
+    Object.keys(byCategory).forEach(function (cat) {
+        cards.push([cat, byCategory[cat]]);
+    });
+
+    container.innerHTML = cards.map(function (pair) {
+        return '<div class="metric-card"><span>' + escapeHtml(pair[0]) + '</span><strong>' + escapeHtml(pair[1]) + '</strong></div>';
+    }).join("");
+}
+
+function renderTtLogAnnotationList(annotationResult) {
+    var container = document.getElementById("ttLogAnnotationList");
+    if (!container) return;
+    if (!annotationResult || annotationResult.annotatedLines.length === 0) {
+        container.innerHTML = '<p class="panel-caption">暂无注解结果，请先执行注解。</p>';
+        return;
+    }
+
+    container.innerHTML = annotationResult.annotatedLines.map(function (item) {
+        var badges = item.annotations.map(function (ann) {
+            return '<span class="annotation-badge annotation-' + escapeHtml(ann.severity) + '" title="' + escapeHtml(ann.category) + '">' + escapeHtml(ann.text) + '</span>';
+        }).join("");
+
+        return '<div class="annotation-item">' +
+            '<div class="annotation-header">' +
+            '<span class="annotation-line-number">' + item.lineNumber + '</span>' +
+            '<span class="annotation-time">' + escapeHtml(item.time) + '</span>' +
+            '<span class="annotation-tag">' + escapeHtml(item.tag) + '</span>' +
+            '<span class="annotation-source">' + escapeHtml(item.sourceLabel) + '</span>' +
+            '</div>' +
+            '<div class="annotation-body">' +
+            '<div class="annotation-badges">' + badges + '</div>' +
+            '<details class="annotation-raw"><summary>原始日志</summary><code>' + escapeHtml(item.line) + '</code></details>' +
+            '</div>' +
+            '</div>';
+    }).join("");
+}
+
+function renderTtLogStatePanel(annotationResult, text) {
+    var container = document.getElementById("ttLogStatePanel");
+    if (!container) return;
+
+    if (!text) {
+        container.innerHTML = "";
+        return;
+    }
+
+    var snapshots = extractTtLogStateSnapshots(text);
+    var summaries = summarizeTtLogStateChanges(snapshots);
+
+    var html = "";
+
+    // Signal summary
+    var signalSummary = summaries.signal;
+    if (signalSummary && !signalSummary.empty) {
+        html += '<div class="state-section"><h3>信号强度追踪 (' + signalSummary.sampleCount + ' 次采样)</h3>';
+        html += '<dl class="protocol-list">';
+        html += '<dt>RSSI 范围</dt><dd>' + signalSummary.rssiMin + ' ~ ' + signalSummary.rssiMax + ' dBm</dd>';
+        html += '<dt>RSSI 平均</dt><dd>' + signalSummary.rssiAvg + ' dBm</dd>';
+        html += '<dt>趋势</dt><dd>' + (signalSummary.trend > 0 ? '信号增强 (改善)' : signalSummary.trend < 0 ? '信号减弱 (恶化)' : '基本稳定') + '</dd>';
+        html += '</dl>';
+        html += '<div class="state-samples">';
+        var displaySamples = signalSummary.samples.slice(0, 20);
+        displaySamples.forEach(function (s) {
+            var cls = s.rssi >= -85 ? "good" : s.rssi >= -100 ? "weak" : "poor";
+            html += '<span class="state-sample state-sample-' + cls + '">' + escapeHtml(s.time) + ' RSSI=' + s.rssi + ' SNR=' + s.snr + '</span>';
+        });
+        if (signalSummary.samples.length > 20) {
+            html += '<span class="state-sample-more">... 还有 ' + (signalSummary.samples.length - 20) + ' 次采样</span>';
+        }
+        html += '</div></div>';
+    } else {
+        html += '<div class="state-section"><p>未采集到信号数据 (^SATSIGNAL)。</p></div>';
+    }
+
+    // Network state changes
+    var netSummary = summaries.network;
+    if (netSummary && !netSummary.empty) {
+        html += '<div class="state-section"><h3>网络注册状态变化 (' + netSummary.changeCount + ' 次变化)</h3>';
+        netSummary.changes.forEach(function (c) {
+            html += '<span class="state-change">' + escapeHtml(c.time) + ' 行' + c.lineNumber + ': ' + escapeHtml(c.label) + '</span>';
+        });
+        html += '</div>';
+    } else {
+        html += '<div class="state-section"><p>未采集到网络状态变化 (+CREG)。</p></div>';
+    }
+
+    // Call state changes
+    var callSummary = summaries.call;
+    if (callSummary && !callSummary.empty) {
+        html += '<div class="state-section"><h3>通话状态变化 (' + callSummary.sampleCount + ' 次事件)</h3>';
+        callSummary.samples.slice(0, 30).forEach(function (c) {
+            html += '<span class="state-change">' + escapeHtml(c.time) + ' 行' + c.lineNumber + ': ' + escapeHtml(c.label) + '</span>';
+        });
+        if (callSummary.samples.length > 30) {
+            html += '<span class="state-sample-more">... 还有 ' + (callSummary.samples.length - 30) + ' 次事件</span>';
+        }
+        html += '</div>';
+    }
+
+    container.innerHTML = html;
+}
+
+function getSelectedTtLogProfiles() {
+    return [...document.querySelectorAll('input[name="ttLogProfile"]:checked')].map((input) => input.value);
+}
+
+function attachTtLogDiagnostic() {
+    const fileInput = document.getElementById("ttLogFile");
+    const presetSelect = document.getElementById("ttLogPresetSelect");
+    const atTagsInput = document.getElementById("ttLogAtTags");
+    const rilTagsInput = document.getElementById("ttLogRilTags");
+    const helperKeywordsInput = document.getElementById("ttLogHelperKeywords");
+    const matchRealTagOnlyInput = document.getElementById("ttLogMatchRealTagOnly");
+    const dedupeEnabledInput = document.getElementById("ttLogDedupeEnabled");
+    const scanBtn = document.getElementById("scanTtLogBtn");
+    const reportBtn = document.getElementById("buildTtLogReportBtn");
+    const copyBtn = document.getElementById("copyTtLogReportBtn");
+    const downloadBtn = document.getElementById("downloadTtLogReportBtn");
+    const exportConfigBtn = document.getElementById("exportTtLogConfigBtn");
+    const importConfigBtn = document.getElementById("importTtLogConfigBtn");
+    const configFileInput = document.getElementById("ttLogConfigFile");
+    const clearBtn = document.getElementById("clearTtLogBtn");
+    const reportBox = document.getElementById("ttLogReport");
+    const statusId = "ttLogStatus";
+    let scanState = null;
+    let annotationState = null;
+
+    if (!fileInput || !presetSelect || !atTagsInput || !rilTagsInput || !helperKeywordsInput ||
+        !matchRealTagOnlyInput || !dedupeEnabledInput || !scanBtn || !reportBtn || !copyBtn ||
+        !downloadBtn || !exportConfigBtn || !importConfigBtn || !configFileInput || !clearBtn || !reportBox) {
+        return;
+    }
+
+    // ---- 拖拽上传 ----
+    var dropZone = document.getElementById("ttLogDropZone");
+    var fileNameDisplay = document.getElementById("ttLogFileName");
+    if (dropZone && fileNameDisplay) {
+        // 全局阻止浏览器默认拖拽行为（否则浏览器会直接打开文件）
+        document.addEventListener("dragover", function (e) { e.preventDefault(); });
+        document.addEventListener("drop", function (e) { e.preventDefault(); });
+
+        dropZone.addEventListener("click", function () { fileInput.click(); });
+
+        dropZone.addEventListener("dragenter", function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add("is-dragover");
+        });
+        dropZone.addEventListener("dragover", function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        dropZone.addEventListener("dragleave", function (e) {
+            // 只在真正离开 dropZone 时移除高亮（避免子元素触发）
+            if (!dropZone.contains(e.relatedTarget)) {
+                dropZone.classList.remove("is-dragover");
+            }
+        });
+        dropZone.addEventListener("drop", function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove("is-dragover");
+            var files = e.dataTransfer.files;
+            if (files && files.length > 0) {
+                fileInput.files = files;
+                fileNameDisplay.textContent = files[0].name;
+                resetView();
+                setStatus("", "info", statusId);
+            }
+        });
+        fileInput.addEventListener("change", function () {
+            var file = fileInput.files?.[0];
+            fileNameDisplay.textContent = file ? file.name : "";
+            resetView();
+            setStatus("", "info", statusId);
+        });
+    }
+
+    const applySourcePreset = (presetId) => {
+        const preset = TT_LOG_SOURCE_PRESETS[presetId] ?? TT_LOG_SOURCE_PRESETS.tt_default;
+        atTagsInput.value = preset.atTags;
+        rilTagsInput.value = preset.rilTags;
+        helperKeywordsInput.value = preset.helperKeywords;
+        matchRealTagOnlyInput.checked = preset.matchRealTagOnly;
+        dedupeEnabledInput.checked = preset.dedupeEnabled;
+    };
+
+    const applySourceConfig = (config) => {
+        presetSelect.value = TT_LOG_SOURCE_PRESETS[config.preset] ? config.preset : "custom";
+        atTagsInput.value = config.atTags ?? TT_LOG_SOURCE_PRESETS.tt_default.atTags;
+        rilTagsInput.value = config.rilTags ?? TT_LOG_SOURCE_PRESETS.tt_default.rilTags;
+        helperKeywordsInput.value = config.helperKeywords ?? TT_LOG_SOURCE_PRESETS.tt_default.helperKeywords;
+        matchRealTagOnlyInput.checked = config.matchRealTagOnly !== false;
+        dedupeEnabledInput.checked = config.dedupeEnabled !== false;
+    };
+
+    const getSourceConfigFromInputs = () => buildTtLogSourceConfig({
+        preset: presetSelect.value,
+        atTags: atTagsInput.value,
+        rilTags: rilTagsInput.value,
+        helperKeywords: helperKeywordsInput.value,
+        matchRealTagOnly: matchRealTagOnlyInput.checked,
+        dedupeEnabled: dedupeEnabledInput.checked,
+    });
+
+    const getRawSourceConfigFromInputs = () => ({
+        preset: presetSelect.value,
+        atTags: atTagsInput.value,
+        rilTags: rilTagsInput.value,
+        helperKeywords: helperKeywordsInput.value,
+        matchRealTagOnly: matchRealTagOnlyInput.checked,
+        dedupeEnabled: dedupeEnabledInput.checked,
+    });
+
+    const readSelectedFileText = async () => {
+        const file = fileInput.files?.[0];
+        if (!file) {
+            setStatus("请先选择 txt/log 日志文件。", "error", statusId);
+            return null;
+        }
+        if (!/\.(txt|log)$/i.test(file.name)) {
+            setStatus("当前只处理 txt 或 log 日志文件。", "error", statusId);
+            return null;
+        }
+        return file.text();
+    };
+
+    const resetView = () => {
+        scanState = null;
+        annotationState = null;
+        reportBox.value = "";
+        renderTtLogSummary(null);
+        renderTtLogTimeline(null);
+        renderTtLogAnnotationSummary(null);
+        renderTtLogAnnotationList(null);
+        renderTtLogStatePanel(null, null);
+        releaseTtLogReportDownloadUrl();
+    };
+
+    scanBtn.addEventListener("click", async () => {
+        const profiles = getSelectedTtLogProfiles();
+        if (profiles.length === 0) {
+            setStatus("请至少选择一个分析场景。", "error", statusId);
+            return;
+        }
+
+        const text = await readSelectedFileText();
+        if (text === null) return;
+
+        try {
+            setStatus("正在扫描关键事件...", "info", statusId);
+            const sourceConfig = getSourceConfigFromInputs();
+            saveTtLogSourceConfig(getRawSourceConfigFromInputs());
+            scanState = scanTtLogEvents(text, {
+                profiles,
+                sourceConfig,
+            });
+            renderTtLogSummary(scanState);
+            renderTtLogTimeline(scanState);
+            reportBox.value = "";
+            setStatus(`扫描完成：原始 ${scanState.totalLines} 行，初筛 ${scanState.filteredLines} 行，命中 ${scanState.events.length} 个关键事件。`, scanState.events.length ? "success" : "info", statusId);
+        } catch (error) {
+            resetView();
+            setStatus(error.message, "error", statusId);
+        }
+    });
+
+    reportBtn.addEventListener("click", () => {
+        if (!scanState || scanState.events.length === 0) {
+            setStatus("请先扫描并命中关键事件。", "error", statusId);
+            return;
+        }
+        reportBox.value = buildTtLogMarkdownReport(scanState);
+        setStatus("报告已生成。", "success", statusId);
+    });
+
+    copyBtn.addEventListener("click", async () => {
+        if (!reportBox.value) {
+            setStatus("请先生成报告。", "error", statusId);
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(reportBox.value);
+            setStatus("报告已复制到剪贴板。", "success", statusId);
+        } catch (error) {
+            setStatus("浏览器未允许访问剪贴板。", "error", statusId);
+        }
+    });
+
+    downloadBtn.addEventListener("click", () => {
+        if (!reportBox.value) {
+            setStatus("请先生成报告。", "error", statusId);
+            return;
+        }
+        downloadTtLogReport(reportBox.value);
+        setStatus("报告下载已触发。", "success", statusId);
+    });
+
+    exportConfigBtn.addEventListener("click", () => {
+        const config = getRawSourceConfigFromInputs();
+        saveTtLogSourceConfig(config);
+        exportTtLogSourceConfigFile(config);
+        setStatus("配置导出已触发。", "success", statusId);
+    });
+
+    importConfigBtn.addEventListener("click", () => {
+        configFileInput.value = "";
+        configFileInput.click();
+    });
+
+    configFileInput.addEventListener("change", async () => {
+        const file = configFileInput.files?.[0];
+        if (!file) {
+            return;
+        }
+
+        try {
+            const config = await importTtLogSourceConfigFile(file);
+            applySourceConfig(config);
+            saveTtLogSourceConfig(config);
+            resetView();
+            setStatus("配置已导入。", "success", statusId);
+        } catch (error) {
+            setStatus(error.message, "error", statusId);
+        }
+    });
+
+    var annotateBtn = document.getElementById("annotateTtLogBtn");
+    if (annotateBtn) {
+        annotateBtn.addEventListener("click", async () => {
+            var text = await readSelectedFileText();
+            if (text === null) return;
+
+            try {
+                setStatus("正在执行逐行注解...", "info", statusId);
+                var sourceConfig = getSourceConfigFromInputs();
+                saveTtLogSourceConfig(getRawSourceConfigFromInputs());
+                annotationState = scanTtLogAnnotations(text, { sourceConfig: sourceConfig });
+                renderTtLogAnnotationSummary(annotationState);
+                renderTtLogAnnotationList(annotationState);
+                renderTtLogStatePanel(annotationState, text);
+                setStatus("注解完成：" + annotationState.annotatedLines.length + " 行匹配，共 " + annotationState.annotationCount + " 条注解。", "success", statusId);
+            } catch (error) {
+                annotationState = null;
+                renderTtLogAnnotationSummary(null);
+                renderTtLogAnnotationList(null);
+                renderTtLogStatePanel(null, null);
+                setStatus(error.message, "error", statusId);
+            }
+        });
+    }
+
+    clearBtn.addEventListener("click", () => {
+        fileInput.value = "";
+        var fd = document.getElementById("ttLogFileName");
+        if (fd) fd.textContent = "";
+        presetSelect.value = "tt_default";
+        applySourcePreset("tt_default");
+        saveTtLogSourceConfig({
+            preset: "tt_default",
+            ...TT_LOG_SOURCE_PRESETS.tt_default,
+        });
+        document.querySelectorAll('input[name="ttLogProfile"]').forEach((input) => {
+            input.checked = input.value === "tt_call";
+        });
+        resetView();
+        setStatus("", "info", statusId);
+    });
+
+    presetSelect.addEventListener("change", () => {
+        if (presetSelect.value !== "custom") {
+            applySourcePreset(presetSelect.value);
+        }
+        resetView();
+        setStatus("", "info", statusId);
+    });
+
+    [fileInput, atTagsInput, rilTagsInput, helperKeywordsInput, matchRealTagOnlyInput,
+        dedupeEnabledInput, ...document.querySelectorAll('input[name="ttLogProfile"]')].forEach((input) => {
+        input.addEventListener("input", () => {
+            if (input !== fileInput) {
+                presetSelect.value = "custom";
+            }
+            resetView();
+            setStatus("", "info", statusId);
+        });
+        input.addEventListener("change", () => {
+            if (input !== fileInput) {
+                presetSelect.value = "custom";
+            }
+            resetView();
+            setStatus("", "info", statusId);
+        });
+    });
+
+    applySourceConfig(loadTtLogSourceConfig());
+}
+
 function attachHandlers() {
     const hexInput = document.getElementById("hexInput");
     const asciiInput = document.getElementById("asciiInput");
@@ -972,6 +2475,7 @@ function attachHandlers() {
     attachProtocolTools();
     attachIpValidator();
     attachAudioPcmParser();
+    attachTtLogDiagnostic();
     initToolShell();
 }
 

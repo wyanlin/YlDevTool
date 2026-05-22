@@ -392,6 +392,10 @@ select {
     font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
 
+.hidden-file-input {
+    display: none;
+}
+
 .field-grid {
     display: grid;
     grid-template-columns: minmax(150px, 0.82fr) minmax(260px, 2.18fr);
@@ -401,6 +405,26 @@ select {
 
 .field-grid textarea {
     min-height: 108px;
+}
+
+.check-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 8px 14px;
+}
+
+.check-grid label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    color: var(--text);
+    font-size: 0.92rem;
+}
+
+.check-grid input {
+    width: 16px;
+    height: 16px;
 }
 
 .input-group {
@@ -417,6 +441,17 @@ select {
     color: var(--muted);
     font-size: 0.85rem;
     line-height: 1.45;
+}
+
+.panel-help {
+    margin: -4px 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(37, 99, 235, 0.08);
+    color: var(--muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
 }
 
 .panel-actions {
@@ -466,6 +501,93 @@ select {
 
 .protocol-result:empty {
     display: none;
+}
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+}
+
+.metric-grid:empty {
+    display: none;
+}
+
+.metric-card {
+    display: grid;
+    gap: 4px;
+    min-height: 70px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, 0.08);
+}
+
+.metric-card span {
+    color: var(--muted);
+    font-size: 0.86rem;
+}
+
+.metric-card strong {
+    font-size: 1.35rem;
+}
+
+.tt-timeline {
+    display: grid;
+    gap: 10px;
+}
+
+.tt-timeline:empty {
+    display: none;
+}
+
+.timeline-item {
+    display: grid;
+    gap: 6px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-left: 4px solid rgba(37, 99, 235, 0.55);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, 0.08);
+}
+
+.timeline-warning {
+    border-left-color: var(--error);
+}
+
+.timeline-important {
+    border-left-color: var(--accent);
+}
+
+.timeline-main {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: baseline;
+}
+
+.timeline-main strong {
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+}
+
+.timeline-main span {
+    font-weight: 700;
+}
+
+.timeline-meta {
+    color: var(--muted);
+    font-size: 0.86rem;
+}
+
+.timeline-item code {
+    display: block;
+    max-width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.06);
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .protocol-list {
@@ -728,4 +850,243 @@ footer {
     .protocol-list {
         grid-template-columns: 1fr;
     }
+}
+
+/* ---- 拖拽上传区域 ---- */
+.drop-zone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 28px 16px;
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    background: rgba(148, 163, 184, 0.04);
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+}
+
+.drop-zone:hover,
+.drop-zone.is-dragover {
+    border-color: var(--accent);
+    background: rgba(37, 99, 235, 0.06);
+}
+
+.drop-zone-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+}
+
+.drop-zone-icon {
+    font-size: 1.8rem;
+    opacity: 0.7;
+}
+
+.drop-zone-text {
+    font-size: 0.88rem;
+    color: var(--muted);
+    text-align: center;
+}
+
+.drop-zone-file {
+    font-size: 0.84rem;
+    color: var(--accent);
+    font-weight: 600;
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    word-break: break-all;
+    text-align: center;
+}
+
+/* ---- 逐行注解列表 ---- */
+.tt-annotation-list {
+    display: grid;
+    gap: 8px;
+    max-height: 600px;
+    overflow-y: auto;
+}
+.tt-annotation-list:empty {
+    display: none;
+}
+
+.annotation-item {
+    display: grid;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, 0.06);
+}
+
+.annotation-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.annotation-line-number {
+    display: inline-flex;
+    justify-content: center;
+    min-width: 44px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.annotation-time {
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 0.84rem;
+    color: var(--muted);
+}
+
+.annotation-tag {
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: rgba(37, 99, 235, 0.12);
+    color: var(--accent);
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 0.78rem;
+}
+
+.annotation-source {
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.annotation-body {
+    display: grid;
+    gap: 6px;
+}
+
+.annotation-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.annotation-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.84rem;
+    line-height: 1.45;
+    background: rgba(37, 99, 235, 0.10);
+    color: var(--text);
+}
+
+.annotation-badge.annotation-warning {
+    background: rgba(220, 38, 38, 0.10);
+    color: var(--error);
+    font-weight: 600;
+}
+
+.annotation-badge.annotation-important {
+    background: rgba(245, 158, 11, 0.12);
+    color: #d97706;
+    font-weight: 600;
+}
+
+.annotation-raw {
+    font-size: 0.84rem;
+}
+
+.annotation-raw summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.82rem;
+    user-select: none;
+}
+
+.annotation-raw code {
+    display: block;
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.05);
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 0.78rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* ---- 状态追踪面板 ---- */
+.tt-state-panel {
+    display: grid;
+    gap: 16px;
+}
+.tt-state-panel:empty {
+    display: none;
+}
+
+.state-section {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, 0.06);
+}
+
+.state-section h3 {
+    margin: 0;
+    font-size: 0.98rem;
+}
+
+.state-section p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.88rem;
+}
+
+.state-samples {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.state-sample {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 0.78rem;
+    background: rgba(148, 163, 184, 0.10);
+}
+
+.state-sample.state-sample-good {
+    background: rgba(22, 163, 74, 0.12);
+    color: var(--success);
+}
+
+.state-sample.state-sample-weak {
+    background: rgba(245, 158, 11, 0.12);
+    color: #d97706;
+}
+
+.state-sample.state-sample-poor {
+    background: rgba(220, 38, 38, 0.10);
+    color: var(--error);
+}
+
+.state-sample-more {
+    color: var(--muted);
+    font-size: 0.82rem;
+    align-self: center;
+}
+
+.state-change {
+    display: block;
+    padding: 3px 0;
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 0.84rem;
 }

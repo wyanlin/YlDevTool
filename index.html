@@ -246,6 +246,95 @@
                             <div id="audioPcmResult" class="protocol-result" aria-live="polite"></div>
                         </section>
                     </div>
+
+                    <div class="view is-hidden" data-view="ttlogdiag" data-title="天通日志诊断" data-category="日志分析" data-subtitle="从 Android/RIL 大日志中提取天通电话、语音、短信、功耗关键事件，生成时间线和报告。">
+                        <section class="panel">
+                            <h2>日志输入</h2>
+                            <p class="panel-caption">选择 txt/log 文件后在浏览器本地扫描，不上传日志。第一版优先识别天通电话相关事件，并保留原始行号方便回查。</p>
+                            <div class="field-grid">
+                                <label>日志文件</label>
+                                <div class="drop-zone" id="ttLogDropZone">
+                                    <input id="ttLogFile" type="file" accept=".txt,.log,text/plain" class="drop-zone-input">
+                                    <span class="drop-zone-icon">&#x1F4C4;</span>
+                                    <span class="drop-zone-text">拖拽 .txt/.log 文件到此处，或点击选择</span>
+                                    <span class="drop-zone-file" id="ttLogFileName"></span>
+                                </div>
+
+                                <label>分析场景</label>
+                                <div class="check-grid" aria-label="分析场景">
+                                    <label><input type="checkbox" name="ttLogProfile" value="tt_call" checked> 天通电话</label>
+                                    <label><input type="checkbox" name="ttLogProfile" value="tt_audio"> Audio语音</label>
+                                    <label><input type="checkbox" name="ttLogProfile" value="tt_sms"> 短信入网</label>
+                                    <label><input type="checkbox" name="ttLogProfile" value="power_sleep"> 功耗休眠</label>
+                                </div>
+
+                                <label for="ttLogPresetSelect">日志来源预设</label>
+                                <select id="ttLogPresetSelect" class="format-select">
+                                    <option value="tt_default">天通默认 RIL 链路</option>
+                                    <option value="custom">自定义</option>
+                                </select>
+
+                                <label for="ttLogAtTags">原始串口 TAG</label>
+                                <input id="ttLogAtTags" type="text" value="RIL_TT-AT" autocomplete="off">
+
+                                <label for="ttLogRilTags">RIL业务 TAG</label>
+                                <input id="ttLogRilTags" type="text" value="RIL_TT" autocomplete="off">
+
+                                <label for="ttLogHelperKeywords">辅助 TAG/关键词</label>
+                                <input id="ttLogHelperKeywords" type="text" value="AudioService,AudioManager,AudioFlinger,Telecom,InCall,PowerManager,wakelock,wake_lock,modem sleep,CP2AP_WAKEUP,suspend,resume,SMS,CREG,SATSIGNAL" autocomplete="off">
+
+                                <label>匹配策略</label>
+                                <div class="check-grid" aria-label="匹配策略">
+                                    <label><input id="ttLogMatchRealTagOnly" type="checkbox" checked> 核心事件只匹配真实TAG</label>
+                                    <label><input id="ttLogDedupeEnabled" type="checkbox" checked> 对重复上报做去重</label>
+                                </div>
+                            </div>
+                            <div class="panel-actions">
+                                <button id="scanTtLogBtn" class="primary" type="button">扫描事件</button>
+                                <button id="buildTtLogReportBtn" type="button">生成报告</button>
+                                <button id="copyTtLogReportBtn" type="button">复制报告</button>
+                                <button id="downloadTtLogReportBtn" type="button">下载报告.md</button>
+                                <button id="exportTtLogConfigBtn" type="button">导出配置</button>
+                                <button id="importTtLogConfigBtn" type="button">导入配置</button>
+                                <input id="ttLogConfigFile" class="hidden-file-input" type="file" accept=".json,application/json">
+                                <button id="clearTtLogBtn" data-status="ttLogStatus" class="clear-btn" type="button">清空</button>
+                                <span id="ttLogStatus" class="status" role="status" aria-live="polite"></span>
+                            </div>
+                        </section>
+
+                        <section class="panel">
+                            <h2>事件概览</h2>
+                            <p class="panel-help">这里统计的是规则命中的关键事件数量，不是通话次数。默认优先使用 <code>RIL_TT-AT</code> 作为串口原始交互证据，<code>RIL_TT</code> 作为 RIL 业务证据，并对上层重复打印做去重。例如一次天通电话过程中，ATD、CLCC、DSCI、NO CARRIER 都可能分别算作“天通电话事件上报”。</p>
+                            <div id="ttLogSummary" class="metric-grid" aria-live="polite"></div>
+                        </section>
+
+                        <section class="panel">
+                            <h2>关键时间线</h2>
+                            <div id="ttLogTimeline" class="tt-timeline" aria-live="polite"></div>
+                        </section>
+
+                        <section class="panel">
+                            <h2>逐行注解</h2>
+                            <p class="panel-caption">对每行日志进行逐行解析，自动识别AT指令并解释其含义，标注信号值、网络状态、通话事件等。</p>
+                            <div class="panel-actions">
+                                <button id="annotateTtLogBtn" class="primary" type="button">执行注解</button>
+                                <span id="ttLogAnnotationStatus" class="status" role="status" aria-live="polite"></span>
+                            </div>
+                            <div id="ttLogAnnotationSummary" class="metric-grid" aria-live="polite"></div>
+                            <div id="ttLogAnnotationList" class="tt-annotation-list" aria-live="polite"></div>
+                        </section>
+
+                        <section class="panel">
+                            <h2>状态变化追踪</h2>
+                            <p class="panel-caption">自动追踪信号强度、网络注册状态、通话状态等关键指标在日志时间跨度内的变化趋势。</p>
+                            <div id="ttLogStatePanel" class="tt-state-panel" aria-live="polite"></div>
+                        </section>
+
+                        <section class="panel">
+                            <h2>诊断报告</h2>
+                            <textarea id="ttLogReport" readonly placeholder="扫描事件后点击生成报告，Markdown 内容会显示在这里。"></textarea>
+                        </section>
+                    </div>
                 </div>
             </section>
         </div>
