@@ -299,6 +299,7 @@
                                 <input id="ttLogConfigFile" class="hidden-file-input" type="file" accept=".json,application/json">
                                 <button id="clearTtLogBtn" data-status="ttLogStatus" class="clear-btn" type="button">清空</button>
                                 <span id="ttLogStatus" class="status" role="status" aria-live="polite"></span>
+                                <progress id="ttLogProgress" class="scan-progress" value="0" max="100"></progress>
                             </div>
                         </section>
 
@@ -310,7 +311,16 @@
 
                         <section class="panel">
                             <h2>关键时间线</h2>
-                            <div id="ttLogTimeline" class="tt-timeline" aria-live="polite"></div>
+                            <div class="chart-controls">
+                                <label><input type="checkbox" id="ttChartShowCall" checked> 通话时段</label>
+                                <label><input type="checkbox" id="ttChartShowSms" checked> 短信事件</label>
+                                <button id="ttChartResetZoom" class="clear-btn" type="button" title="重置缩放">重置缩放</button>
+                                <span id="ttChartStatus" class="status" role="status" aria-live="polite"></span>
+                            </div>
+                            <div class="chart-container">
+                                <canvas id="ttLogChart"></canvas>
+                                <div id="ttChartTooltip" class="chart-tooltip"></div>
+                            </div>
                         </section>
 
                         <section class="panel">

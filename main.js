@@ -1854,6 +1854,319 @@ function downloadTtLogReport(report) {
     link.click();
 }
 
+// ==================== 图表：时间解析与数据提取 ====================
+function parseTimestampToMs(timeStr) {
+    if (!timeStr) return 0;
+    // Format: "MM-DD HH:MM:SS.mmm"
+    var match = timeStr.match(/(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\.?(\d{0,3})/);
+    if (!match) return 0;
+    var day = parseInt(match[1], 10);
+    var hour = parseInt(match[3], 10);
+    var min = parseInt(match[4], 10);
+    var sec = parseInt(match[5], 10);
+    var ms = parseInt((match[6] || "0").padEnd(3, "0"), 10);
+    return ((day * 24 + hour) * 60 + min) * 60 * 1000 + sec * 1000 + ms;
+}
+
+function formatTimeTick(ms) {
+    var totalSec = Math.floor(ms / 1000);
+    var h = Math.floor(totalSec / 3600) % 24;
+    var m = Math.floor((totalSec % 3600) / 60);
+    var s = totalSec % 60;
+    if (h > 0) {
+        return h + ":" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+    }
+    return m + ":" + String(s).padStart(2, "0");
+}
+
+function extractCallPeriods(callSnapshots) {
+    // callSnapshots: [{time, lineNumber, id, idr, stat, number, label}, ...]
+    // Group by call id, find start (stat=2 or 4) and end (stat=6)
+    var byId = {};
+    callSnapshots.forEach(function (s) {
+        if (!byId[s.id]) byId[s.id] = [];
+        byId[s.id].push(s);
+    });
+
+    var periods = [];
+    Object.keys(byId).forEach(function (key) {
+        var events = byId[key];
+        events.sort(function (a, b) { return a.lineNumber - b.lineNumber; });
+        var start = null;
+        var direction = events[0].idr === 1 ? "被叫" : "主叫";
+        var number = events[0].number || "";
+
+        for (var i = 0; i < events.length; i++) {
+            var e = events[i];
+            if (e.stat === 2 || e.stat === 4) {
+                // dialing or incoming = call starts
+                start = e;
+            } else if (e.stat === 6 && start) {
+                // terminated = call ends
+                periods.push({
+                    callId: parseInt(key, 10),
+                    startTime: start.time,
+                    endTime: e.time,
+                    startMs: parseTimestampToMs(start.time),
+                    endMs: parseTimestampToMs(e.time),
+                    direction: direction,
+                    number: number,
+                });
+                start = null;
+            }
+        }
+        // Fallback: if call started but no termination, use last event as end
+        if (start) {
+            var last = events[events.length - 1];
+            periods.push({
+                callId: parseInt(key, 10),
+                startTime: start.time,
+                endTime: last.time,
+                startMs: parseTimestampToMs(start.time),
+                endMs: parseTimestampToMs(last.time),
+                direction: direction,
+                number: number,
+            });
+        }
+    });
+
+    periods.sort(function (a, b) { return a.startMs - b.startMs; });
+    return periods;
+}
+
+function extractSmsMarkers(events) {
+    // events: from scanResult.events or annotation result
+    // Returns: [{time, type, number, text}]
+    if (!events) return [];
+    var markers = [];
+    events.forEach(function (e) {
+        // Check if it's an SMS-related event
+        if (e.type === "sms" || e.category === "短信事件" || e.category === "短信入网") {
+            markers.push({
+                time: e.time,
+                ms: parseTimestampToMs(e.time),
+                text: e.message || e.category,
+            });
+        }
+        // Also check annotations for SMS
+        if (e.annotations) {
+            e.annotations.forEach(function (ann) {
+                if (ann.type === "sms" || ann.category === "短信事件") {
+                    markers.push({
+                        time: e.time,
+                        ms: parseTimestampToMs(e.time),
+                        text: ann.text,
+                    });
+                }
+            });
+        }
+    });
+
+    markers.sort(function (a, b) { return a.ms - b.ms; });
+    // Deduplicate by time
+    var deduped = [];
+    markers.forEach(function (m) {
+        if (deduped.length === 0 || deduped[deduped.length - 1].ms !== m.ms) {
+            deduped.push(m);
+        }
+    });
+    return deduped;
+}
+
+function computeYRange(values, padding) {
+    if (values.length === 0) return { min: 0, max: 100, range: 100 };
+    var min = Math.min.apply(null, values);
+    var max = Math.max.apply(null, values);
+    if (min === max) {
+        min -= 10;
+        max += 10;
+    }
+    var pad = padding || 5;
+    min = Math.floor(min - pad);
+    max = Math.ceil(max + pad);
+    return { min: min, max: max, range: max - min };
+}
+
+function pickTimeTicks(minMs, maxMs, maxTicks) {
+    maxTicks = maxTicks || 10;
+    var range = maxMs - minMs;
+    if (range <= 0) return [minMs];
+
+    var step = range / maxTicks;
+    // Round step to nice intervals: 1s, 5s, 10s, 30s, 1min, 5min, 10min, 30min
+    var niceSteps = [1000, 5000, 10000, 30000, 60000, 300000, 600000, 1800000];
+    var roundedStep = niceSteps[0];
+    for (var i = 0; i < niceSteps.length; i++) {
+        if (niceSteps[i] >= step) {
+            roundedStep = niceSteps[i];
+            break;
+        }
+    }
+
+    var ticks = [];
+    var t = Math.ceil(minMs / roundedStep) * roundedStep;
+    while (t <= maxMs) {
+        ticks.push(t);
+        t += roundedStep;
+    }
+    return ticks;
+}
+
+// ==================== 进度条辅助 ====================
+function showScanProgress() {
+    var bar = document.getElementById("ttLogProgress");
+    if (bar) { bar.value = 0; bar.style.display = "block"; }
+}
+
+function updateScanProgress(done, total) {
+    var bar = document.getElementById("ttLogProgress");
+    if (bar && total > 0) {
+        bar.value = Math.min(Math.round(done / total * 100), 100);
+    }
+}
+
+function hideScanProgress() {
+    var bar = document.getElementById("ttLogProgress");
+    if (bar) { bar.style.display = "none"; bar.value = 0; }
+}
+
+// ---- 分块异步扫描：避免大日志阻塞 UI ----
+var SCAN_CHUNK_SIZE = 600;
+
+function scanTtLogEventsAsync(text, options) {
+    return new Promise(function (resolve) {
+        var selectedProfiles = new Set(options.profiles);
+        var sourceConfig = buildTtLogSourceConfig(options.sourceConfig || {});
+        var rules = TT_LOG_RULES.filter(function (rule) { return selectedProfiles.has(rule.profile); });
+        var lines = splitLogLines(text);
+        var total = lines.length;
+        var events = [];
+        var filteredLines = 0;
+        var chunkSize = SCAN_CHUNK_SIZE;
+
+        function processChunk(startIdx) {
+            var endIdx = Math.min(startIdx + chunkSize, total);
+            for (var i = startIdx; i < endIdx; i++) {
+                var line = lines[i];
+                var parsed = parseTtLogLine(line, i + 1);
+                var source = ttLogLineMatchesSource(parsed, sourceConfig);
+                if (!source) continue;
+                filteredLines++;
+
+                for (var r = 0; r < rules.length; r++) {
+                    var rule = rules[r];
+                    if (sourceConfig.matchRealTagOnly && rule.profile === "tt_call" && source.kind === "helper") continue;
+                    var matched = rule.match(line);
+                    if (!matched) continue;
+                    events.push({
+                        line: parsed.line,
+                        lineNumber: parsed.lineNumber,
+                        time: parsed.time,
+                        tag: parsed.tag,
+                        profile: rule.profile,
+                        profileLabel: TT_LOG_PROFILE_LABELS[rule.profile] || rule.profile,
+                        type: rule.type,
+                        category: rule.category,
+                        message: matched.message,
+                        fields: matched.fields || {},
+                        severity: matched.severity || "info",
+                        sourceKind: source.kind,
+                        sourceLabel: source.label,
+                    });
+                }
+            }
+
+            updateScanProgress(endIdx, total);
+
+            if (endIdx < total) {
+                setTimeout(function () { processChunk(endIdx); }, 0);
+            } else {
+                var dedupeResult = sourceConfig.dedupeEnabled ? dedupeTtLogEvents(events) : { events: events, duplicateCount: 0 };
+                resolve({
+                    totalLines: total,
+                    filteredLines: filteredLines,
+                    profiles: [].concat([].slice.call(selectedProfiles)),
+                    sourceConfig: sourceConfig,
+                    events: dedupeResult.events,
+                    rawEventCount: events.length,
+                    duplicateCount: dedupeResult.duplicateCount,
+                });
+            }
+        }
+
+        showScanProgress();
+        setTimeout(function () { processChunk(0); }, 10);
+    });
+}
+
+function scanTtLogAnnotationsAsync(text, options) {
+    return new Promise(function (resolve) {
+        var sourceConfig = buildTtLogSourceConfig(options.sourceConfig || {});
+        var lines = splitLogLines(text);
+        var total = lines.length;
+        var annotatedLines = [];
+        var filteredLines = 0;
+        var chunkSize = SCAN_CHUNK_SIZE;
+
+        function processChunk(startIdx) {
+            var endIdx = Math.min(startIdx + chunkSize, total);
+            for (var i = startIdx; i < endIdx; i++) {
+                var line = lines[i];
+                var parsed = parseTtLogLine(line, i + 1);
+                var source = ttLogLineMatchesSource(parsed, sourceConfig);
+                if (!source) continue;
+                filteredLines++;
+
+                var annotations = [];
+                for (var j = 0; j < TT_LOG_ANNOTATORS.length; j++) {
+                    var result = TT_LOG_ANNOTATORS[j].match(line);
+                    if (result && result.annotations) {
+                        for (var k = 0; k < result.annotations.length; k++) {
+                            annotations.push({
+                                type: TT_LOG_ANNOTATORS[j].type,
+                                category: TT_LOG_ANNOTATORS[j].category,
+                                text: result.annotations[k].text,
+                                severity: result.annotations[k].severity || "info",
+                                fields: result.annotations[k].fields || {},
+                            });
+                        }
+                    }
+                }
+
+                if (annotations.length > 0) {
+                    annotatedLines.push({
+                        lineNumber: parsed.lineNumber,
+                        time: parsed.time,
+                        tag: parsed.tag,
+                        line: line,
+                        sourceKind: source.kind,
+                        sourceLabel: source.label,
+                        annotations: annotations,
+                    });
+                }
+            }
+
+            updateScanProgress(endIdx, total);
+
+            if (endIdx < total) {
+                setTimeout(function () { processChunk(endIdx); }, 0);
+            } else {
+                var totalAnnotations = annotatedLines.reduce(function (sum, l) { return sum + l.annotations.length; }, 0);
+                resolve({
+                    totalLines: total,
+                    filteredLines: filteredLines,
+                    annotatedLines: annotatedLines,
+                    annotationCount: totalAnnotations,
+                    sourceConfig: sourceConfig,
+                });
+            }
+        }
+
+        showScanProgress();
+        setTimeout(function () { processChunk(0); }, 10);
+    });
+}
+
 // ==================== 逐行注解：核心扫描函数 ====================
 function scanTtLogAnnotations(text, options) {
     var sourceConfig = buildTtLogSourceConfig(options.sourceConfig || {});
@@ -2043,6 +2356,516 @@ function renderTtLogAnnotationList(annotationResult) {
     }).join("");
 }
 
+// ==================== 图表：Canvas 折线图渲染（含缩放/平移/悬停） ====================
+function resetChartZoom(canvas) {
+    if (canvas && canvas._chart) {
+        canvas._chart.viewMin = null;
+        canvas._chart.viewMax = null;
+    }
+}
+
+var _chartTooltipHideTimer = 0;
+
+function renderTtLogChart(scanState, text, options) {
+    var canvas = document.getElementById("ttLogChart");
+    if (!canvas) return;
+    var container = canvas.parentElement;
+    if (!container) return;
+    var tooltip = document.getElementById("ttChartTooltip");
+
+    var opts = options || {};
+    var showCall = opts.showCall !== false;
+    var showSms = opts.showSms !== false;
+
+    // ---- 数据：优先从已有 chart state 复用，否则重新提取 ----
+    var prevCh = canvas._chart;
+    var signalSamples, callPeriods, smsMarkers, tMin, tMax;
+
+    if (prevCh && prevCh.signalSamples && text === null) {
+        // 缩放/平移回调：复用已存储数据
+        signalSamples = prevCh.signalSamples;
+        callPeriods = showCall ? prevCh.callPeriods : [];
+        smsMarkers = showSms ? (prevCh.smsMarkers || []) : [];
+        tMin = prevCh.tMin;
+        tMax = prevCh.tMax;
+    } else {
+        // 初次或刷新：重新提取
+        var snapshots = text ? extractTtLogStateSnapshots(text) : { signal: [], call: [], network: [] };
+        signalSamples = (snapshots.signal || []).filter(function (s) { return s.rssi !== undefined && s.snr !== undefined; });
+        callPeriods = showCall ? extractCallPeriods(snapshots.call || []) : [];
+        smsMarkers = showSms ? extractSmsMarkers(scanState ? scanState.events : []) : [];
+
+        var allTimes = [];
+        signalSamples.forEach(function (s) {
+            var ms = parseTimestampToMs(s.time);
+            if (ms > 0) allTimes.push(Math.floor(ms));
+        });
+        callPeriods.forEach(function (p) {
+            if (p.startMs > 0) allTimes.push(p.startMs);
+            if (p.endMs > 0) allTimes.push(p.endMs);
+        });
+        smsMarkers.forEach(function (m) {
+            if (m.ms > 0) allTimes.push(m.ms);
+        });
+
+        tMin = allTimes.length > 0 ? Math.min.apply(null, allTimes) : 0;
+        tMax = allTimes.length > 0 ? Math.max.apply(null, allTimes) : tMin + 60000;
+        if (tMax === tMin) tMax = tMin + 60000;
+
+        // 重置 zoom 到全范围
+        prevCh = {};
+    }
+
+    // Check if we have any data
+    if (signalSamples.length === 0 && callPeriods.length === 0) {
+        var ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--muted").trim() || "#94a3b8";
+        ctx.font = "14px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("暂无信号数据可用 (^SATSIGNAL)", canvas.width / 2, canvas.height / 2);
+        canvas._chart = null;
+        return;
+    }
+
+    // ---- 存储数据到 canvas 供事件处理使用 ----
+    var ch = prevCh;
+    ch.tMin = tMin;
+    ch.tMax = tMax;
+    ch.signalSamples = signalSamples;
+    ch.callPeriods = callPeriods;
+    ch.smsMarkers = smsMarkers;
+    ch.showCall = showCall;
+    ch.showSms = showSms;
+
+    // ---- Zoom state (persisted) ----
+    if (ch.viewMin == null || ch.viewMax == null) {
+        ch.viewMin = tMin;
+        ch.viewMax = tMax;
+    }
+    // Clamp view to data range
+    if (ch.viewMin < tMin) ch.viewMin = tMin;
+    if (ch.viewMax > tMax) ch.viewMax = tMax;
+    var viewMin = ch.viewMin;
+    var viewMax = ch.viewMax;
+    var viewRange = viewMax - viewMin;
+    if (viewRange <= 0) { viewRange = 60000; viewMax = viewMin + 60000; }
+
+    canvas._chart = ch;
+
+    // ---- RSSI / SNR 范围 ----
+    var rssiVals = signalSamples.map(function (s) { return s.rssi; });
+    var snrVals = signalSamples.map(function (s) { return s.snr; });
+    var rssiRange = computeYRange(rssiVals, 5);
+    var snrRange = computeYRange(snrVals, 3);
+
+    // ---- Canvas 尺寸 ----
+    var dpr = window.devicePixelRatio || 1;
+    var rect = container.getBoundingClientRect();
+    var w = rect.width;
+    var h = Math.max(w * 0.5, 350);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+
+    // ---- 边距 ----
+    var margin = { top: 20, right: 60, bottom: 40, left: 52 };
+    var plotW = w - margin.left - margin.right;
+    var plotH = h - margin.top - margin.bottom;
+    ch.margin = margin;
+    ch.plotW = plotW;
+    ch.plotH = plotH;
+    ch.w = w;
+    ch.h = h;
+    ch.rssiRange = rssiRange;
+    ch.snrRange = snrRange;
+
+    // ---- 坐标映射（基于 view 范围） ----
+    function timeToX(ms) { return margin.left + (ms - viewMin) / viewRange * plotW; }
+    function xToTime(x) { return viewMin + (x - margin.left) / plotW * viewRange; }
+    function rssiToY(rssi) { return margin.top + (rssiRange.max - rssi) / rssiRange.range * plotH; }
+    function snrToY(snr) { return margin.top + (snrRange.max - snr) / snrRange.range * plotH; }
+    ch.timeToX = timeToX;
+    ch.xToTime = xToTime;
+    ch.rssiToY = rssiToY;
+    ch.snrToY = snrToY;
+
+    // ---- 样式 ----
+    var style = getComputedStyle(document.body);
+    var bgColor = style.getPropertyValue("--bg-main") || style.getPropertyValue("--bg") || "#ffffff";
+    var textColor = style.getPropertyValue("--muted") || "#94a3b8";
+    var borderColor = style.getPropertyValue("--border") || "#e2e8f0";
+    var accentColor = style.getPropertyValue("--accent") || "#2563eb";
+    ch.accentColor = accentColor;
+
+    // ---- 1. 背景 ----
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, w, h);
+
+    // ---- 2. 裁剪区域（绘图区） ----
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(margin.left, margin.top, plotW, plotH);
+    ctx.clip();
+
+    // ---- 3. 通话时段色块 ----
+    if (showCall && callPeriods.length > 0) {
+        callPeriods.forEach(function (p) {
+            if (p.startMs >= viewMax || p.endMs <= viewMin) return;
+            var x1 = timeToX(Math.max(p.startMs, viewMin));
+            var x2 = timeToX(Math.min(p.endMs, viewMax));
+            var isOutgoing = p.direction === "主叫";
+            ctx.fillStyle = isOutgoing ? "rgba(37, 99, 235, 0.10)" : "rgba(22, 163, 74, 0.10)";
+            ctx.fillRect(x1, margin.top, x2 - x1, plotH);
+
+            if (x2 - x1 > 40) {
+                ctx.fillStyle = isOutgoing ? "rgba(37, 99, 235, 0.35)" : "rgba(22, 163, 74, 0.35)";
+                ctx.font = "11px system-ui, sans-serif";
+                ctx.textAlign = "center";
+                var label = p.direction + (p.number ? " " + p.number : "");
+                ctx.fillText(label, (x1 + x2) / 2, margin.top + 14);
+            }
+        });
+    }
+
+    // ---- 4. SMS 事件标记 ----
+    if (showSms && smsMarkers.length > 0) {
+        smsMarkers.forEach(function (m) {
+            if (m.ms < viewMin || m.ms > viewMax) return;
+            var x = timeToX(m.ms);
+            ctx.strokeStyle = "#d97706";
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(x, margin.top);
+            ctx.lineTo(x, margin.top + plotH);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = "#d97706";
+            ctx.font = "10px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("SMS", x, margin.top + plotH - 4);
+        });
+    }
+
+    // ---- 5. RSSI 折线 ----
+    if (rssiVals.length > 0) {
+        ctx.strokeStyle = accentColor;
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        var firstRssi = true;
+        signalSamples.forEach(function (s) {
+            var ms = parseTimestampToMs(s.time);
+            if (ms <= 0) return;
+            var x = timeToX(ms);
+            var y = rssiToY(s.rssi);
+            if (firstRssi) { ctx.moveTo(x, y); firstRssi = false; }
+            else { ctx.lineTo(x, y); }
+        });
+        ctx.stroke();
+
+        if (signalSamples.length <= 500) {
+            ctx.fillStyle = accentColor;
+            signalSamples.forEach(function (s) {
+                var ms = parseTimestampToMs(s.time);
+                if (ms <= 0) return;
+                var x = timeToX(ms);
+                var y = rssiToY(s.rssi);
+                ctx.beginPath();
+                ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+    }
+
+    // ---- 6. SNR 折线 ----
+    if (snrVals.length > 0) {
+        ctx.strokeStyle = "#16a34a";
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        var firstSnr = true;
+        signalSamples.forEach(function (s) {
+            var ms = parseTimestampToMs(s.time);
+            if (ms <= 0) return;
+            var x = timeToX(ms);
+            var y = snrToY(s.snr);
+            if (firstSnr) { ctx.moveTo(x, y); firstSnr = false; }
+            else { ctx.lineTo(x, y); }
+        });
+        ctx.stroke();
+
+        if (signalSamples.length <= 500) {
+            ctx.fillStyle = "#16a34a";
+            signalSamples.forEach(function (s) {
+                var ms = parseTimestampToMs(s.time);
+                if (ms <= 0) return;
+                var x = timeToX(ms);
+                var y = snrToY(s.snr);
+                ctx.beginPath();
+                ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+    }
+
+    ctx.restore(); // 结束裁剪
+
+    // ---- 7. Y 轴标签（左 RSSI / 右 SNR） ----
+    ctx.fillStyle = textColor;
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.textAlign = "right";
+    var rssiTicks = 5;
+    for (var i = 0; i <= rssiTicks; i++) {
+        var val = rssiRange.max - (rssiRange.range / rssiTicks) * i;
+        var y = margin.top + (plotH / rssiTicks) * i;
+        ctx.fillText(Math.round(val) + " dBm", margin.left - 6, y + 4);
+    }
+
+    var snrTicks = 4;
+    ctx.textAlign = "left";
+    for (var i = 0; i <= snrTicks; i++) {
+        var val = snrRange.max - (snrRange.range / snrTicks) * i;
+        var y = margin.top + (plotH / snrTicks) * i;
+        ctx.fillText(Math.round(val) + " dB", margin.left + plotW + 6, y + 4);
+    }
+
+    // ---- 8. X 轴时间标签 ----
+    var timeTicks = pickTimeTicks(viewMin, viewMax, 8);
+    ctx.fillStyle = textColor;
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    timeTicks.forEach(function (tick) {
+        var x = timeToX(tick);
+        ctx.fillText(formatTimeTick(tick - tMin), x, h - 6);
+    });
+
+    // ---- 9. Y 轴标题 ----
+    ctx.save();
+    ctx.fillStyle = accentColor;
+    ctx.font = "bold 11px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.translate(12, margin.top + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("RSSI", 0, 0);
+    ctx.restore();
+
+    ctx.save();
+    ctx.fillStyle = "#16a34a";
+    ctx.font = "bold 11px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.translate(w - 12, margin.top + plotH / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.fillText("SNR", 0, 0);
+    ctx.restore();
+
+    // ---- 10. 图例 ----
+    var legendX = margin.left + 8;
+    var legendY = margin.top + 4;
+    ctx.fillStyle = accentColor;
+    ctx.fillRect(legendX, legendY, 14, 3);
+    ctx.fillStyle = textColor;
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("RSSI (dBm)", legendX + 18, legendY + 5);
+    ctx.fillStyle = "#16a34a";
+    ctx.fillRect(legendX + 100, legendY, 14, 3);
+    ctx.fillText("SNR (dB)", legendX + 118, legendY + 5);
+
+    if (showCall && callPeriods.length > 0) {
+        ctx.fillStyle = "rgba(37, 99, 235, 0.25)";
+        ctx.fillRect(legendX + 210, legendY - 3, 14, 12);
+        ctx.fillStyle = textColor;
+        ctx.fillText("主叫", legendX + 228, legendY + 5);
+        ctx.fillStyle = "rgba(22, 163, 74, 0.25)";
+        ctx.fillRect(legendX + 264, legendY - 3, 14, 12);
+        ctx.fillText("被叫", legendX + 282, legendY + 5);
+    }
+
+    if (showSms && smsMarkers.length > 0) {
+        ctx.strokeStyle = "#d97706";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(legendX + 328, legendY + 3);
+        ctx.lineTo(legendX + 342, legendY + 3);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = textColor;
+        ctx.fillText("短信", legendX + 346, legendY + 5);
+    }
+
+    // ---- 11. 缩放提示 ----
+    if (viewRange < (tMax - tMin) * 0.99 || viewMin > tMin) {
+        ctx.fillStyle = textColor;
+        ctx.font = "10px system-ui, sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText("滚轮缩放 | 拖拽平移 | 双击重置", w - 8, h - 6);
+    }
+
+    // ---- 12. 鼠标事件（首次绑定时设置） ----
+    if (!canvas._eventsBound) {
+        canvas._eventsBound = true;
+
+        canvas.addEventListener("wheel", function (e) {
+            e.preventDefault();
+            var ch = canvas._chart;
+            if (!ch) return;
+            var rect = canvas.getBoundingClientRect();
+            var mx = e.clientX - rect.left;
+            var factor = e.deltaY < 0 ? 0.85 : 1.18;
+            var t = ch.xToTime(mx);
+            var newRange = (ch.viewMax - ch.viewMin) * factor;
+            var ratio = (t - ch.viewMin) / (ch.viewMax - ch.viewMin);
+            ch.viewMin = t - newRange * ratio;
+            ch.viewMax = t + newRange * (1 - ratio);
+            if (ch.viewMin < ch.tMin) ch.viewMin = ch.tMin;
+            if (ch.viewMax > ch.tMax) ch.viewMax = ch.tMax;
+            if (ch.viewMax - ch.viewMin < 2000) { ch.viewMax = ch.viewMin + 2000; }
+            renderTtLogChart(null, null, { showCall: ch.showCall, showSms: ch.showSms });
+        }, { passive: false });
+
+        var dragging = false;
+        var dragStartX = 0;
+        var dragStartViewMin = 0;
+        var dragStartViewMax = 0;
+
+        canvas.addEventListener("mousedown", function (e) {
+            var ch = canvas._chart;
+            if (!ch) return;
+            dragging = true;
+            dragStartX = e.clientX;
+            dragStartViewMin = ch.viewMin;
+            dragStartViewMax = ch.viewMax;
+            canvas.style.cursor = "grabbing";
+        });
+
+        window.addEventListener("mousemove", function (e) {
+            var ch = canvas._chart;
+            if (!ch) return;
+
+            if (dragging) {
+                var rect = canvas.getBoundingClientRect();
+                var dx = e.clientX - dragStartX;
+                var scale = (ch.viewMax - ch.viewMin) / ch.plotW;
+                var dt = -dx * scale;
+                ch.viewMin = dragStartViewMin + dt;
+                ch.viewMax = dragStartViewMax + dt;
+                if (ch.viewMin < ch.tMin) { var shift = ch.tMin - ch.viewMin; ch.viewMin += shift; ch.viewMax += shift; }
+                if (ch.viewMax > ch.tMax) { var shift = ch.viewMax - ch.tMax; ch.viewMin -= shift; ch.viewMax -= shift; }
+                if (ch.viewMin < ch.tMin) ch.viewMin = ch.tMin;
+                renderTtLogChart(null, null, { showCall: ch.showCall, showSms: ch.showSms });
+                return;
+            }
+
+            // ---- Tooltip logic ----
+            if (!tooltip) return;
+            var rect = canvas.getBoundingClientRect();
+            var mx = e.clientX - rect.left;
+            var my = e.clientY - rect.top;
+
+            if (mx < ch.margin.left || mx > ch.margin.left + ch.plotW || my < ch.margin.top || my > ch.margin.top + ch.plotH) {
+                tooltip.style.display = "none";
+                canvas.style.cursor = "";
+                return;
+            }
+
+            var t = ch.xToTime(mx);
+            var tooltipHtml = "";
+
+            // Check call periods
+            if (ch.showCall && ch.callPeriods) {
+                for (var i = 0; i < ch.callPeriods.length; i++) {
+                    var p = ch.callPeriods[i];
+                    if (t >= p.startMs && t <= p.endMs) {
+                        tooltipHtml = '<strong>' + p.direction + '</strong>' + (p.number ? ' ' + escapeHtml(p.number) : '') +
+                            '<br>开始: ' + escapeHtml(p.startTime) +
+                            '<br>结束: ' + escapeHtml(p.endTime);
+                        canvas.style.cursor = "pointer";
+                        break;
+                    }
+                }
+            }
+
+            // Check SMS markers
+            if (!tooltipHtml && ch.showSms && ch.smsMarkers) {
+                for (var j = 0; j < ch.smsMarkers.length; j++) {
+                    var m = ch.smsMarkers[j];
+                    var mx2 = ch.timeToX(m.ms);
+                    if (Math.abs(mx - mx2) < 8) {
+                        tooltipHtml = '<strong>短信事件</strong><br>' + escapeHtml(m.text) + '<br>' + escapeHtml(m.time);
+                        canvas.style.cursor = "pointer";
+                        break;
+                    }
+                }
+            }
+
+            // Check signal samples
+            if (!tooltipHtml && ch.signalSamples) {
+                var closest = null;
+                var closestDist = 12;
+                for (var k = 0; k < ch.signalSamples.length; k++) {
+                    var s = ch.signalSamples[k];
+                    var sx = ch.timeToX(parseTimestampToMs(s.time));
+                    if (Math.abs(mx - sx) < closestDist) {
+                        closestDist = Math.abs(mx - sx);
+                        closest = s;
+                    }
+                }
+                if (closest) {
+                    tooltipHtml = '<strong>信号</strong><br>RSSI: ' + closest.rssi + ' dBm (' + interpretRssi(closest.rssi) +
+                        ')<br>SNR: ' + closest.snr + ' dB (' + interpretSnr(closest.snr) +
+                        ')<br>' + escapeHtml(closest.time);
+                    canvas.style.cursor = "crosshair";
+                }
+            }
+
+            if (tooltipHtml) {
+                tooltip.innerHTML = tooltipHtml;
+                tooltip.style.display = "block";
+                var tipX = e.clientX + 16;
+                var tipY = e.clientY - 10;
+                if (tipX + 220 > window.innerWidth) tipX = e.clientX - 226;
+                if (tipY + 120 > window.innerHeight) tipY = e.clientY - 130;
+                tooltip.style.left = tipX + "px";
+                tooltip.style.top = tipY + "px";
+            } else {
+                tooltip.style.display = "none";
+                canvas.style.cursor = "";
+            }
+        });
+
+        window.addEventListener("mouseup", function () {
+            if (dragging) {
+                dragging = false;
+                canvas.style.cursor = "";
+            }
+        });
+
+        canvas.addEventListener("dblclick", function () {
+            resetChartZoom(canvas);
+            var ch = canvas._chart;
+            if (ch) {
+                renderTtLogChart(null, null, { showCall: ch.showCall, showSms: ch.showSms });
+            }
+        });
+
+        // Hide tooltip when leaving canvas
+        canvas.addEventListener("mouseleave", function () {
+            if (tooltip) tooltip.style.display = "none";
+            dragging = false;
+            canvas.style.cursor = "";
+        });
+    }
+}
+
 function renderTtLogStatePanel(annotationResult, text) {
     var container = document.getElementById("ttLogStatePanel");
     if (!container) return;
@@ -2132,6 +2955,22 @@ function attachTtLogDiagnostic() {
     const statusId = "ttLogStatus";
     let scanState = null;
     let annotationState = null;
+    var chartText = null;
+
+    var getChartOptions = function () {
+        var showCallCb = document.getElementById("ttChartShowCall");
+        var showSmsCb = document.getElementById("ttChartShowSms");
+        return {
+            showCall: showCallCb ? showCallCb.checked : true,
+            showSms: showSmsCb ? showSmsCb.checked : true,
+        };
+    };
+
+    var redrawChart = function () {
+        if (chartText && scanState) {
+            renderTtLogChart(scanState, chartText, getChartOptions());
+        }
+    };
 
     if (!fileInput || !presetSelect || !atTagsInput || !rilTagsInput || !helperKeywordsInput ||
         !matchRealTagOnlyInput || !dedupeEnabledInput || !scanBtn || !reportBtn || !copyBtn ||
@@ -2236,12 +3075,17 @@ function attachTtLogDiagnostic() {
     const resetView = () => {
         scanState = null;
         annotationState = null;
+        chartText = null;
         reportBox.value = "";
         renderTtLogSummary(null);
-        renderTtLogTimeline(null);
         renderTtLogAnnotationSummary(null);
         renderTtLogAnnotationList(null);
         renderTtLogStatePanel(null, null);
+        var chartCanvas = document.getElementById("ttLogChart");
+        if (chartCanvas) {
+            var ctx = chartCanvas.getContext("2d");
+            ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
+        }
         releaseTtLogReportDownloadUrl();
     };
 
@@ -2259,15 +3103,18 @@ function attachTtLogDiagnostic() {
             setStatus("正在扫描关键事件...", "info", statusId);
             const sourceConfig = getSourceConfigFromInputs();
             saveTtLogSourceConfig(getRawSourceConfigFromInputs());
-            scanState = scanTtLogEvents(text, {
+            scanState = await scanTtLogEventsAsync(text, {
                 profiles,
                 sourceConfig,
             });
+            hideScanProgress();
+            chartText = text;
             renderTtLogSummary(scanState);
-            renderTtLogTimeline(scanState);
+            renderTtLogChart(scanState, text, getChartOptions());
             reportBox.value = "";
             setStatus(`扫描完成：原始 ${scanState.totalLines} 行，初筛 ${scanState.filteredLines} 行，命中 ${scanState.events.length} 个关键事件。`, scanState.events.length ? "success" : "info", statusId);
         } catch (error) {
+            hideScanProgress();
             resetView();
             setStatus(error.message, "error", statusId);
         }
@@ -2343,12 +3190,14 @@ function attachTtLogDiagnostic() {
                 setStatus("正在执行逐行注解...", "info", statusId);
                 var sourceConfig = getSourceConfigFromInputs();
                 saveTtLogSourceConfig(getRawSourceConfigFromInputs());
-                annotationState = scanTtLogAnnotations(text, { sourceConfig: sourceConfig });
+                annotationState = await scanTtLogAnnotationsAsync(text, { sourceConfig: sourceConfig });
+                hideScanProgress();
                 renderTtLogAnnotationSummary(annotationState);
                 renderTtLogAnnotationList(annotationState);
                 renderTtLogStatePanel(annotationState, text);
                 setStatus("注解完成：" + annotationState.annotatedLines.length + " 行匹配，共 " + annotationState.annotationCount + " 条注解。", "success", statusId);
             } catch (error) {
+                hideScanProgress();
                 annotationState = null;
                 renderTtLogAnnotationSummary(null);
                 renderTtLogAnnotationList(null);
@@ -2400,6 +3249,26 @@ function attachTtLogDiagnostic() {
             setStatus("", "info", statusId);
         });
     });
+
+    // ---- 图表复选框 ----
+    var chartShowCallCb = document.getElementById("ttChartShowCall");
+    var chartShowSmsCb = document.getElementById("ttChartShowSms");
+    if (chartShowCallCb) {
+        chartShowCallCb.addEventListener("change", function () { redrawChart(); });
+    }
+    if (chartShowSmsCb) {
+        chartShowSmsCb.addEventListener("change", function () { redrawChart(); });
+    }
+    var resetZoomBtn = document.getElementById("ttChartResetZoom");
+    if (resetZoomBtn) {
+        resetZoomBtn.addEventListener("click", function () {
+            var canvas = document.getElementById("ttLogChart");
+            if (canvas) {
+                resetChartZoom(canvas);
+                redrawChart();
+            }
+        });
+    }
 
     applySourceConfig(loadTtLogSourceConfig());
 }
