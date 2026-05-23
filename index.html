@@ -345,6 +345,100 @@
                             <textarea id="ttLogReport" readonly placeholder="扫描事件后点击生成报告，Markdown 内容会显示在这里。"></textarea>
                         </section>
                     </div>
+
+                    <div class="view is-hidden" data-view="logtrimmer" data-title="日志裁剪工具" data-category="日志分析" data-subtitle="加载日志文件，按行号、时间、关键字或事件上下文进行裁剪，导出精简结果。">
+                        <section class="panel">
+                            <h2>日志文件输入</h2>
+                            <p class="panel-caption">选择 txt/log 文件后自动统计行数和时间跨度，不上传服务器。</p>
+                            <div class="field-grid">
+                                <label>日志文件</label>
+                                <div class="drop-zone" id="ltDropZone">
+                                    <input id="ltLogFile" type="file" accept=".txt,.log,text/plain" class="drop-zone-input">
+                                    <span class="drop-zone-icon">&#x1F4C4;</span>
+                                    <span class="drop-zone-text">拖拽 .txt/.log 文件到此处，或点击选择</span>
+                                    <span class="drop-zone-file" id="ltLogFileName"></span>
+                                </div>
+                            </div>
+                            <div id="ltLogPreview" class="protocol-result" style="display:none;" aria-live="polite"></div>
+                        </section>
+
+                        <section class="panel">
+                            <h2>裁剪模式</h2>
+                            <div class="lt-mode-tabs" id="ltModeTabs">
+                                <button type="button" class="lt-mode-tab active" data-mode="line">按行号范围</button>
+                                <button type="button" class="lt-mode-tab" data-mode="time">按时间范围</button>
+                                <button type="button" class="lt-mode-tab" data-mode="keyword">按关键字过滤</button>
+                                <button type="button" class="lt-mode-tab" data-mode="context">按事件前后上下文</button>
+                            </div>
+
+                            <div class="lt-mode-panel" id="ltModeLine">
+                                <div class="field-grid">
+                                    <label for="ltLineStart">起始行号（1-based）</label>
+                                    <input id="ltLineStart" type="number" min="1" value="1" autocomplete="off">
+                                    <label for="ltLineEnd">结束行号（1-based）</label>
+                                    <input id="ltLineEnd" type="number" min="1" value="100" autocomplete="off">
+                                </div>
+                            </div>
+
+                            <div class="lt-mode-panel is-hidden" id="ltModeTime">
+                                <div class="field-grid">
+                                    <label for="ltTimeStart">起始时间（MM-DD HH:MM:SS）</label>
+                                    <input id="ltTimeStart" type="text" placeholder="例如：01-15 10:30:00" autocomplete="off">
+                                    <label for="ltTimeEnd">结束时间（MM-DD HH:MM:SS）</label>
+                                    <input id="ltTimeEnd" type="text" placeholder="例如：01-15 12:00:00" autocomplete="off">
+                                </div>
+                                <p class="field-note">时间格式为 MM-DD HH:MM:SS（秒可选），与日志行头时间戳一致。无法解析时间戳的行将被排除。</p>
+                            </div>
+
+                            <div class="lt-mode-panel is-hidden" id="ltModeKeyword">
+                                <div class="field-grid">
+                                    <label for="ltKeywords">关键字 / TAG（| 分隔）</label>
+                                    <input id="ltKeywords" type="text" placeholder="例如：RIL_TT-AT|AudioService" autocomplete="off">
+                                    <label>过滤方式</label>
+                                    <div class="check-grid">
+                                        <label><input type="radio" name="ltKeywordMode" value="include" checked> 保留匹配行</label>
+                                        <label><input type="radio" name="ltKeywordMode" value="exclude"> 排除匹配行</label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="lt-mode-panel is-hidden" id="ltModeContext">
+                                <div class="field-grid">
+                                    <label for="ltEventType">事件类型</label>
+                                    <select id="ltEventType" class="format-select">
+                                        <option value="">请先加载日志文件</option>
+                                    </select>
+                                    <label for="ltContextBefore">前导行数</label>
+                                    <input id="ltContextBefore" type="number" min="0" value="3" autocomplete="off">
+                                    <label for="ltContextAfter">后随行数</label>
+                                    <input id="ltContextAfter" type="number" min="0" value="3" autocomplete="off">
+                                </div>
+                                <p class="field-note">系统自动从日志中发现高频 TAG/关键字作为事件类型。重叠区间自动合并，不会产生重复行。</p>
+                            </div>
+                        </section>
+
+                        <section class="panel">
+                            <h2>裁剪预览与执行</h2>
+                            <div id="ltTrimPreview" class="metric-grid" aria-live="polite"></div>
+                            <div class="panel-actions">
+                                <button id="ltTrimBtn" class="primary" type="button">执行裁剪</button>
+                                <button id="ltClearBtn" data-status="ltStatus" class="clear-btn" type="button">清空</button>
+                                <span id="ltStatus" class="status" role="status" aria-live="polite"></span>
+                            </div>
+                        </section>
+
+                        <section class="panel" id="ltResultPanel">
+                            <h2 class="lt-collapse-toggle">裁剪结果 <span class="lt-collapse-arrow">&#9652;</span></h2>
+                            <div class="lt-collapse-body">
+                                <div class="panel-actions">
+                                    <button id="ltReTrimBtn" type="button">在结果上继续裁剪</button>
+                                <button id="ltCopyBtn" type="button">复制结果</button>
+                                    <button id="ltDownloadBtn" type="button">下载裁剪日志</button>
+                                </div>
+                                <textarea id="ltResult" readonly placeholder="执行裁剪后结果显示在此。"></textarea>
+                            </div>
+                        </section>
+                    </div>
                 </div>
             </section>
         </div>

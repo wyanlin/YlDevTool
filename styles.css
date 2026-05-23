@@ -1169,3 +1169,98 @@ footer {
     max-width: 220px;
     white-space: nowrap;
 }
+
+/* ---- 日志裁剪：模式标签 ---- */
+.lt-mode-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.lt-mode-tab {
+    min-height: 36px;
+    padding: 8px 18px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.lt-mode-tab:hover {
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+.lt-mode-tab.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+}
+
+.lt-mode-panel.is-hidden {
+    display: none;
+}
+
+/* ---- 日志裁剪：文件预览信息行 ---- */
+.lt-preview-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    font-size: 0.9rem;
+}
+
+.lt-preview-item {
+    display: inline-flex;
+    gap: 6px;
+}
+
+.lt-preview-item span:first-child {
+    color: var(--muted);
+}
+
+.lt-preview-item span:last-child {
+    font-weight: 700;
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+}
+
+/* ---- 日志裁剪：结果区域 ---- */
+#ltResult {
+    min-height: 420px;
+}
+
+.lt-collapse-toggle {
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.lt-collapse-toggle:hover {
+    color: var(--accent);
+}
+
+.lt-collapse-arrow {
+    font-size: 0.7rem;
+    transition: transform 0.2s;
+}
+
+.lt-collapse-body {
+    overflow: hidden;
+    transition: max-height 0.3s ease, opacity 0.3s ease, margin 0.3s ease;
+}
+
+.lt-result-collapsed .lt-collapse-body {
+    max-height: 0;
+    opacity: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.lt-result-collapsed .lt-collapse-arrow {
+    transform: rotate(180deg);
+}

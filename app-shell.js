@@ -40,6 +40,13 @@ const TOOL_REGISTRY = [
         tags: ["天通", "RIL", "Audio", "功耗"],
     },
     {
+        id: "logtrimmer",
+        category: "log",
+        title: "日志裁剪",
+        description: "按行号、时间范围、关键字或事件上下文对日志进行裁剪，导出精简日志文件。",
+        tags: ["裁剪", "过滤", "日志"],
+    },
+    {
         id: "converter",
         category: "converter",
         title: "十六进制 ⇄ ASCII",

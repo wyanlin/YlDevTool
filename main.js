@@ -1486,7 +1486,7 @@ function parseTtLogLine(line, lineNumber) {
 function parseTtLogFilters(value) {
     if (Array.isArray(value)) return value;
     return String(value ?? "")
-        .split(",")
+        .split("|")
         .map((item) => item.trim())
         .filter(Boolean);
 }
@@ -3273,6 +3273,393 @@ function attachTtLogDiagnostic() {
     applySourceConfig(loadTtLogSourceConfig());
 }
 
+function attachLogTrimmer() {
+    const fileInput = document.getElementById("ltLogFile");
+    const dropZone = document.getElementById("ltDropZone");
+    const fileNameDisplay = document.getElementById("ltLogFileName");
+    const logPreview = document.getElementById("ltLogPreview");
+    const modeTabsEl = document.getElementById("ltModeTabs");
+    const panelLine = document.getElementById("ltModeLine");
+    const panelTime = document.getElementById("ltModeTime");
+    const panelKeyword = document.getElementById("ltModeKeyword");
+    const panelContext = document.getElementById("ltModeContext");
+    const trimPreview = document.getElementById("ltTrimPreview");
+    const trimBtn = document.getElementById("ltTrimBtn");
+    const clearBtn = document.getElementById("ltClearBtn");
+    const resultBox = document.getElementById("ltResult");
+    const copyBtn = document.getElementById("ltCopyBtn");
+    const downloadBtn = document.getElementById("ltDownloadBtn");
+    const reTrimBtn = document.getElementById("ltReTrimBtn");
+    const statusId = "ltStatus";
+
+    const lineStartInput = document.getElementById("ltLineStart");
+    const lineEndInput = document.getElementById("ltLineEnd");
+    const timeStartInput = document.getElementById("ltTimeStart");
+    const timeEndInput = document.getElementById("ltTimeEnd");
+    const keywordsInput = document.getElementById("ltKeywords");
+    const keywordModeRadios = document.querySelectorAll('input[name="ltKeywordMode"]');
+    const eventTypeSelect = document.getElementById("ltEventType");
+    const contextBeforeInput = document.getElementById("ltContextBefore");
+    const contextAfterInput = document.getElementById("ltContextAfter");
+
+    if (!fileInput || !trimBtn) return;
+
+    const resultPanel = document.getElementById("ltResultPanel");
+    const collapseToggle = resultPanel ? resultPanel.querySelector(".lt-collapse-toggle") : null;
+
+    let logLines = [];
+    let logTimestamps = [];
+    let trimmedLines = [];
+    let currentMode = "line";
+    let detectedEventTypes = [];
+    let downloadUrl = "";
+
+    const readSelectedFileText = async () => {
+        const file = fileInput.files?.[0];
+        if (!file) { setStatus("请先选择 txt/log 日志文件。", "error", statusId); return null; }
+        if (!/\.(txt|log)$/i.test(file.name)) {
+            setStatus("当前只处理 txt 或 log 日志文件。", "error", statusId); return null;
+        }
+        return file.text();
+    };
+
+    const detectEventTypes = () => {
+        const tagCounts = {};
+        const tagPattern = /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+[A-Z]\s+(\S+?)\s*:/;
+        for (const line of logLines) {
+            const m = line.match(tagPattern);
+            if (m) {
+                const tag = m[1];
+                tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+            }
+        }
+        const keywordPattern = /(?:DSCI:|CREG:|SATSIGNAL:|DAUDPCM:|NO CARRIER|CALL_STATE|AudioTrack|AudioRecord)/;
+        for (const line of logLines) {
+            const km = line.match(keywordPattern);
+            if (km) {
+                const key = km[0];
+                tagCounts[key] = (tagCounts[key] || 0) + 1;
+            }
+        }
+        const entries = Object.entries(tagCounts)
+            .filter(function([, count]) { return count >= 3; })
+            .sort(function(a, b) { return b[1] - a[1]; })
+            .slice(0, 30);
+        detectedEventTypes = entries.map(function([tag, count]) { return { tag: tag, count: count }; });
+        eventTypeSelect.innerHTML = '<option value="">请选择事件类型</option>' +
+            detectedEventTypes.map(function(e) {
+                return '<option value="' + escapeAttribute(e.tag) + '">' + escapeHtml(e.tag) + ' (' + e.count + ' 次)</option>';
+            }).join("");
+    };
+
+    const loadAndParseFile = async () => {
+        const text = await readSelectedFileText();
+        if (text === null) return;
+        logLines = splitLogLines(text);
+        logTimestamps = logLines.map(function(line) {
+            var ts = extractLogTimestamp(line);
+            return { time: ts, matched: ts !== "未知时间" };
+        });
+        var validTimestamps = logTimestamps.filter(function(t) { return t.matched; }).map(function(t) { return t.time; });
+        var minTime = validTimestamps.length ? validTimestamps[0] : "--";
+        var maxTime = validTimestamps.length ? validTimestamps[validTimestamps.length - 1] : "--";
+        logPreview.style.display = "block";
+        logPreview.innerHTML =
+            '<div class="lt-preview-row">' +
+            '<div class="lt-preview-item"><span>总行数:</span><span>' + logLines.length.toLocaleString() + '</span></div>' +
+            '<div class="lt-preview-item"><span>有效时间戳行:</span><span>' + validTimestamps.length.toLocaleString() + '</span></div>' +
+            '<div class="lt-preview-item"><span>时间跨度:</span><span>' + escapeHtml(minTime) + ' ～ ' + escapeHtml(maxTime) + '</span></div>' +
+            '</div>';
+        if (!timeStartInput.value && minTime !== "--") timeStartInput.value = minTime;
+        if (!timeEndInput.value && maxTime !== "--") timeEndInput.value = maxTime;
+        detectEventTypes();
+        trimmedLines = [];
+        resultBox.value = "";
+        updateTrimPreview();
+    };
+
+    const getKeywordMode = function() {
+        for (var i = 0; i < keywordModeRadios.length; i++) {
+            if (keywordModeRadios[i].checked) return keywordModeRadios[i].value;
+        }
+        return "include";
+    };
+
+    const mergeRanges = function(ranges) {
+        if (!ranges.length) return [];
+        var sorted = ranges.slice().sort(function(a, b) { return a.start - b.start; });
+        var merged = [sorted[0]];
+        for (var i = 1; i < sorted.length; i++) {
+            var last = merged[merged.length - 1];
+            if (sorted[i].start <= last.end + 1) {
+                last.end = Math.max(last.end, sorted[i].end);
+            } else {
+                merged.push(sorted[i]);
+            }
+        }
+        return merged;
+    };
+
+    const computePreviewCount = function() {
+        if (!logLines.length) return 0;
+        switch (currentMode) {
+            case "line": {
+                var start = Math.max(1, parseInt(lineStartInput.value, 10) || 1);
+                var end = Math.min(logLines.length, parseInt(lineEndInput.value, 10) || logLines.length);
+                return Math.max(0, end - start + 1);
+            }
+            case "time": {
+                var startTs = timeStartInput.value.trim();
+                var endTs = timeEndInput.value.trim();
+                if (!startTs && !endTs) return logLines.length;
+                return logTimestamps.filter(function(t) {
+                    if (!t.matched) return false;
+                    if (startTs && t.time < startTs) return false;
+                    if (endTs && t.time > endTs) return false;
+                    return true;
+                }).length;
+            }
+            case "keyword": {
+                var keywords = keywordsInput.value.split("|").map(function(k) { return k.trim(); }).filter(Boolean);
+                if (!keywords.length) return logLines.length;
+                var includeMode = getKeywordMode() === "include";
+                return logLines.filter(function(line) {
+                    var matched = keywords.some(function(kw) { return line.includes(kw); });
+                    return includeMode ? matched : !matched;
+                }).length;
+            }
+            case "context": {
+                var eventTag = eventTypeSelect.value;
+                if (!eventTag) return 0;
+                var before = Math.max(0, parseInt(contextBeforeInput.value, 10) || 0);
+                var after = Math.max(0, parseInt(contextAfterInput.value, 10) || 0);
+                var matchIndices = [];
+                logLines.forEach(function(line, i) { if (line.includes(eventTag)) matchIndices.push(i); });
+                if (!matchIndices.length) return 0;
+                var ranges = mergeRanges(matchIndices.map(function(i) { return { start: Math.max(0, i - before), end: Math.min(logLines.length - 1, i + after) }; }));
+                return ranges.reduce(function(sum, r) { return sum + (r.end - r.start + 1); }, 0);
+            }
+            default: return 0;
+        }
+    };
+
+    const updateTrimPreview = function() {
+        if (!logLines.length) { trimPreview.innerHTML = ""; return; }
+        var keepCount = computePreviewCount();
+        var removeCount = logLines.length - keepCount;
+        var pct = logLines.length ? ((keepCount / logLines.length) * 100).toFixed(1) : "0.0";
+        trimPreview.innerHTML =
+            '<div class="metric-card"><span>原始总行数</span><strong>' + logLines.length.toLocaleString() + '</strong></div>' +
+            '<div class="metric-card"><span>裁剪后保留</span><strong>' + keepCount.toLocaleString() + '</strong></div>' +
+            '<div class="metric-card"><span>裁剪掉</span><strong>' + removeCount.toLocaleString() + '</strong></div>' +
+            '<div class="metric-card"><span>保留比例</span><strong>' + pct + '%</strong></div>';
+    };
+
+    const releaseDownloadUrl = function() {
+        if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = ""; }
+    };
+
+    const resetView = function() {
+        logLines = [];
+        logTimestamps = [];
+        trimmedLines = [];
+        detectedEventTypes = [];
+        eventTypeSelect.innerHTML = '<option value="">请先加载日志文件</option>';
+        logPreview.style.display = "none";
+        logPreview.innerHTML = "";
+        resultBox.value = "";
+        trimPreview.innerHTML = "";
+        releaseDownloadUrl();
+    };
+
+    if (dropZone && fileNameDisplay) {
+        document.addEventListener("dragover", function(e) { e.preventDefault(); });
+        document.addEventListener("drop", function(e) { e.preventDefault(); });
+        dropZone.addEventListener("click", function() { fileInput.click(); });
+        dropZone.addEventListener("dragenter", function(e) {
+            e.preventDefault(); e.stopPropagation();
+            dropZone.classList.add("is-dragover");
+        });
+        dropZone.addEventListener("dragover", function(e) {
+            e.preventDefault(); e.stopPropagation();
+        });
+        dropZone.addEventListener("dragleave", function(e) {
+            if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove("is-dragover");
+        });
+        dropZone.addEventListener("drop", async function(e) {
+            e.preventDefault(); e.stopPropagation();
+            dropZone.classList.remove("is-dragover");
+            var files = e.dataTransfer.files;
+            if (files && files.length > 0) {
+                fileInput.files = files;
+                fileNameDisplay.textContent = files[0].name;
+                resetView();
+                setStatus("", "info", statusId);
+                await loadAndParseFile();
+            }
+        });
+        fileInput.addEventListener("change", async function() {
+            var file = fileInput.files?.[0];
+            fileNameDisplay.textContent = file ? file.name : "";
+            resetView();
+            setStatus("", "info", statusId);
+            if (file) await loadAndParseFile();
+        });
+    }
+
+    modeTabsEl.querySelectorAll(".lt-mode-tab").forEach(function(tab) {
+        tab.addEventListener("click", function() {
+            currentMode = tab.dataset.mode;
+            modeTabsEl.querySelectorAll(".lt-mode-tab").forEach(function(t) { t.classList.remove("active"); });
+            tab.classList.add("active");
+            [panelLine, panelTime, panelKeyword, panelContext].forEach(function(p) { if (p) p.classList.add("is-hidden"); });
+            var modeMap = { line: "ltModeLine", time: "ltModeTime", keyword: "ltModeKeyword", context: "ltModeContext" };
+            var targetPanel = document.getElementById(modeMap[currentMode]);
+            if (targetPanel) targetPanel.classList.remove("is-hidden");
+            updateTrimPreview();
+        });
+    });
+
+    if (collapseToggle) {
+        collapseToggle.addEventListener("click", function() {
+            resultPanel.classList.toggle("lt-result-collapsed");
+        });
+    }
+
+    var debounceTimer = null;
+    var debouncedPreview = function() {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        setStatus("计算中…", "info", statusId);
+        debounceTimer = setTimeout(function() {
+            updateTrimPreview();
+            setStatus("", "info", statusId);
+        }, 300);
+    };
+
+    var textInputs = [timeStartInput, timeEndInput, keywordsInput].filter(Boolean);
+    textInputs.forEach(function(input) {
+        input.addEventListener("input", debouncedPreview);
+        input.addEventListener("change", function() {
+            if (debounceTimer) clearTimeout(debounceTimer);
+            updateTrimPreview();
+            setStatus("", "info", statusId);
+        });
+    });
+
+    var numberInputs = [lineStartInput, lineEndInput, contextBeforeInput, contextAfterInput, eventTypeSelect].filter(Boolean);
+    numberInputs.forEach(function(input) {
+        input.addEventListener("input", updateTrimPreview);
+        input.addEventListener("change", updateTrimPreview);
+    });
+    keywordModeRadios.forEach(function(radio) {
+        radio.addEventListener("change", updateTrimPreview);
+    });
+
+    trimBtn.addEventListener("click", function() {
+        if (!logLines.length) { setStatus("请先加载日志文件。", "error", statusId); return; }
+        var resultLines = [];
+        switch (currentMode) {
+            case "line": {
+                var start = Math.max(1, parseInt(lineStartInput.value, 10) || 1) - 1;
+                var end = Math.min(logLines.length, parseInt(lineEndInput.value, 10) || logLines.length);
+                resultLines = logLines.slice(start, end);
+                break;
+            }
+            case "time": {
+                var startTs = timeStartInput.value.trim();
+                var endTs = timeEndInput.value.trim();
+                resultLines = logLines.filter(function(line, i) {
+                    var ts = logTimestamps[i];
+                    if (!ts.matched) return false;
+                    if (startTs && ts.time < startTs) return false;
+                    if (endTs && ts.time > endTs) return false;
+                    return true;
+                });
+                break;
+            }
+            case "keyword": {
+                var keywords = keywordsInput.value.split("|").map(function(k) { return k.trim(); }).filter(Boolean);
+                if (!keywords.length) { setStatus("请输入至少一个关键字或 TAG。", "error", statusId); return; }
+                var includeMode = getKeywordMode() === "include";
+                resultLines = logLines.filter(function(line) {
+                    var matched = keywords.some(function(kw) { return line.includes(kw); });
+                    return includeMode ? matched : !matched;
+                });
+                break;
+            }
+            case "context": {
+                var eventTag = eventTypeSelect.value;
+                if (!eventTag) { setStatus("请选择事件类型。", "error", statusId); return; }
+                var before = Math.max(0, parseInt(contextBeforeInput.value, 10) || 0);
+                var after = Math.max(0, parseInt(contextAfterInput.value, 10) || 0);
+                var matchIndices = [];
+                logLines.forEach(function(line, i) { if (line.includes(eventTag)) matchIndices.push(i); });
+                if (!matchIndices.length) {
+                    setStatus("未找到包含 \"" + eventTag + "\" 的日志行。", "info", statusId);
+                    resultBox.value = "";
+                    trimmedLines = [];
+                    return;
+                }
+                var ranges = mergeRanges(matchIndices.map(function(i) { return { start: Math.max(0, i - before), end: Math.min(logLines.length - 1, i + after) }; }));
+                resultLines = ranges.reduce(function(arr, r) { return arr.concat(logLines.slice(r.start, r.end + 1)); }, []);
+                break;
+            }
+        }
+        trimmedLines = resultLines;
+        resultBox.value = resultLines.join("\n");
+        var keepPct = logLines.length ? ((resultLines.length / logLines.length) * 100).toFixed(1) : "0.0";
+        setStatus("裁剪完成：保留 " + resultLines.length.toLocaleString() + " 行 (" + keepPct + "%)。", "success", statusId);
+    });
+
+    reTrimBtn.addEventListener("click", function() {
+        if (!trimmedLines.length) { setStatus("请先执行裁剪。", "error", statusId); return; }
+        logLines = trimmedLines;
+        logTimestamps = logLines.map(function(line) {
+            var ts = extractLogTimestamp(line);
+            return { time: ts, matched: ts !== "未知时间" };
+        });
+        trimmedLines = [];
+        resultBox.value = "";
+        detectEventTypes();
+        updateTrimPreview();
+        logPreview.scrollIntoView({ behavior: "smooth" });
+        setStatus("已将裁剪结果作为新输入（" + logLines.length.toLocaleString() + " 行），可继续裁剪。", "success", statusId);
+    });
+
+    copyBtn.addEventListener("click", async function() {
+        if (!resultBox.value) { setStatus("请先执行裁剪。", "error", statusId); return; }
+        try {
+            await navigator.clipboard.writeText(resultBox.value);
+            setStatus("结果已复制到剪贴板。", "success", statusId);
+        } catch (e) {
+            setStatus("浏览器未允许访问剪贴板。", "error", statusId);
+        }
+    });
+
+    downloadBtn.addEventListener("click", function() {
+        if (!resultBox.value) { setStatus("请先执行裁剪。", "error", statusId); return; }
+        releaseDownloadUrl();
+        var originalFile = fileInput.files?.[0];
+        var baseName = originalFile ? originalFile.name.replace(/\.(txt|log)$/i, "") : "trimmed-log";
+        var suffixMap = { line: "-line", time: "-time", keyword: "-keyword", context: "-context" };
+        var suffix = suffixMap[currentMode] || "";
+        var blob = new Blob([resultBox.value], { type: "text/plain;charset=utf-8" });
+        downloadUrl = URL.createObjectURL(blob);
+        var link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = baseName + suffix + ".txt";
+        link.click();
+        setStatus("下载已触发。", "success", statusId);
+    });
+
+    clearBtn.addEventListener("click", function() {
+        fileInput.value = "";
+        if (fileNameDisplay) fileNameDisplay.textContent = "";
+        resetView();
+        setStatus("", "info", statusId);
+    });
+}
+
 function attachHandlers() {
     const hexInput = document.getElementById("hexInput");
     const asciiInput = document.getElementById("asciiInput");
@@ -3345,6 +3732,7 @@ function attachHandlers() {
     attachIpValidator();
     attachAudioPcmParser();
     attachTtLogDiagnostic();
+    attachLogTrimmer();
     initToolShell();
 }
 
