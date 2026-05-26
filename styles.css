@@ -1264,3 +1264,34 @@ footer {
 .lt-result-collapsed .lt-collapse-arrow {
     transform: rotate(180deg);
 }
+
+/* ---- 日志裁剪：迭代裁剪提示条 ---- */
+.lt-retrim-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 16px;
+    margin-bottom: 14px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 10px;
+    font-size: 0.88rem;
+    color: var(--text);
+}
+
+.lt-reset-btn {
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.lt-reset-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}

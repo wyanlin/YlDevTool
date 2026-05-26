@@ -3287,6 +3287,8 @@ function attachLogTrimmer() {
     const trimBtn = document.getElementById("ltTrimBtn");
     const clearBtn = document.getElementById("ltClearBtn");
     const resultBox = document.getElementById("ltResult");
+    const reTrimBanner = document.getElementById("ltReTrimBanner");
+    const resetFileBtn = document.getElementById("ltResetFileBtn");
     const copyBtn = document.getElementById("ltCopyBtn");
     const downloadBtn = document.getElementById("ltDownloadBtn");
     const reTrimBtn = document.getElementById("ltReTrimBtn");
@@ -3308,6 +3310,7 @@ function attachLogTrimmer() {
     const collapseToggle = resultPanel ? resultPanel.querySelector(".lt-collapse-toggle") : null;
 
     let logLines = [];
+    let originalLogLines = [];
     let logTimestamps = [];
     let trimmedLines = [];
     let currentMode = "line";
@@ -3375,6 +3378,7 @@ function attachLogTrimmer() {
         detectEventTypes();
         trimmedLines = [];
         resultBox.value = "";
+        originalLogLines = logLines.slice();
         updateTrimPreview();
     };
 
@@ -3469,6 +3473,7 @@ function attachLogTrimmer() {
         logPreview.innerHTML = "";
         resultBox.value = "";
         trimPreview.innerHTML = "";
+        if (reTrimBanner) reTrimBanner.style.display = "none";
         releaseDownloadUrl();
     };
 
@@ -3619,12 +3624,31 @@ function attachLogTrimmer() {
             return { time: ts, matched: ts !== "未知时间" };
         });
         trimmedLines = [];
-        resultBox.value = "";
+        document.getElementById("ltReTrimCount").textContent = logLines.length.toLocaleString();
+        if (reTrimBanner) reTrimBanner.style.display = "flex";
         detectEventTypes();
         updateTrimPreview();
         logPreview.scrollIntoView({ behavior: "smooth" });
-        setStatus("已将裁剪结果作为新输入（" + logLines.length.toLocaleString() + " 行），可继续裁剪。", "success", statusId);
+        setStatus("已切换为基于裁剪结果继续操作（" + logLines.length.toLocaleString() + " 行）。", "success", statusId);
     });
+
+    if (resetFileBtn) {
+        resetFileBtn.addEventListener("click", function() {
+            if (!originalLogLines.length) return;
+            logLines = originalLogLines.slice();
+            logTimestamps = logLines.map(function(line) {
+                var ts = extractLogTimestamp(line);
+                return { time: ts, matched: ts !== "未知时间" };
+            });
+            trimmedLines = [];
+            resultBox.value = "";
+            if (reTrimBanner) reTrimBanner.style.display = "none";
+            detectEventTypes();
+            updateTrimPreview();
+            logPreview.scrollIntoView({ behavior: "smooth" });
+            setStatus("已恢复为原始文件（" + logLines.length.toLocaleString() + " 行）。", "success", statusId);
+        });
+    }
 
     copyBtn.addEventListener("click", async function() {
         if (!resultBox.value) { setStatus("请先执行裁剪。", "error", statusId); return; }
